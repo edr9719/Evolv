@@ -1,0 +1,127 @@
+{
+  "confirmations" : {
+    "confirmedFields" : {
+
+    },
+    "manualReviewNotes" : [
+
+    ]
+  },
+  "facts" : {
+    "accessibilityURL" : "",
+    "appName" : "",
+    "authProvider" : "",
+    "backendProvider" : "",
+    "bundleIdentifier" : "",
+    "collectsCameraData" : false,
+    "collectsContactsData" : false,
+    "collectsHealthData" : false,
+    "collectsLocationData" : false,
+    "collectsMicrophoneData" : false,
+    "collectsPhotoLibraryData" : false,
+    "companyName" : "",
+    "contactEmail" : "",
+    "entitlementKeys" : [
+
+    ],
+    "hasUserGeneratedContent" : false,
+    "inferenceNotes" : [
+
+    ],
+    "integratedServices" : [
+
+    ],
+    "jurisdiction" : "",
+    "kidFocused" : false,
+    "legalEntityName" : "",
+    "marketingURL" : "",
+    "permissionUsageDescriptions" : {
+
+    },
+    "privacyTrackingDomains" : [
+
+    ],
+    "projectSummary" : "",
+    "requiredReasonAPIs" : [
+
+    ],
+    "servesEUUsers" : false,
+    "supportEmail" : "",
+    "supportName" : "",
+    "supportsAccountDeletion" : false,
+    "usesAccounts" : false,
+    "usesAds" : false,
+    "usesAnalytics" : false,
+    "usesSubscriptions" : false,
+    "usesTracking" : false,
+    "websiteURL" : ""
+  },
+  "generated" : {
+    "metadata" : {
+      "accessibilityHints" : [
+
+      ],
+      "accessibilityRecommended" : false,
+      "ageRatingHints" : [
+
+      ],
+      "appPrivacyEntries" : [
+
+      ],
+      "appStoreDescription" : "",
+      "categorySuggestions" : [
+
+      ],
+      "demoAccountChecklist" : [
+
+      ],
+      "keywords" : [
+
+      ],
+      "promotionalText" : "",
+      "reviewNotes" : [
+
+      ],
+      "reviewerContactChecklist" : [
+
+      ]
+    },
+    "privacy" : {
+      "intro" : [
+
+      ],
+      "sections" : [
+
+      ],
+      "title" : ""
+    },
+    "support" : {
+      "intro" : [
+
+      ],
+      "sections" : [
+
+      ],
+      "title" : ""
+    },
+    "terms" : {
+      "intro" : [
+
+      ],
+      "sections" : [
+
+      ],
+      "title" : ""
+    },
+    "warnings" : [
+
+    ]
+  },
+  "publish" : {
+    "isPublished" : false,
+    "lastPublishedSlug" : "",
+    "locale" : "en-US",
+    "publicSlug" : "build-a-modern-mobile-app-called-evolv-an-ai-p"
+  },
+  "releaseNotes" : ""
+}

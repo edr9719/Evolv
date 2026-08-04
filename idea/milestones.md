@@ -1,0 +1,11 @@
+- [x] Confirm design reference + color palette
+- [ ] Onboarding flow (welcome, consistency education, profile, optional measurements, cadence, baseline snapshot)
+- [ ] Guided photo capture with silhouette overlay + live consistency coaching
+- [ ] Home dashboard with Progress Score hero + weekly AI summary + estimated metrics
+- [ ] AI analysis screen with region body diagram, confidence chips, honest insights
+- [ ] Transformation timeline with before/after slider + first-vs-latest view
+- [ ] Stats screen (weight, measurements, streaks, scan frequency, progress rate)
+- [ ] Premium paywall UI (monthly $9.99 / yearly $69.99)
+- [ ] Deterministic mock AI engine with plateau + neutral/negative feedback rules
+- [ ] Local persistence (SwiftData) for profile, scans, measurements, insights
+- [ ] Scan library with consistency badges

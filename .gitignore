@@ -1,0 +1,30 @@
+# Local environment and secret files
+.env
+.env.local
+.env.*.local
+
+# Xcode generated files
+DerivedData/
+build/
+.build/
+*.xcarchive
+*.ipa
+*.xcuserstate
+**/xcuserdata/
+**/*.xcworkspace/xcuserdata/
+*.moved-aside
+*.xccheckout
+*.xcscmblueprint
+
+# Swift Package Manager
+.swiftpm/
+
+# macOS
+.DS_Store
+
+# TenX local state
+.tenx/
+tenx/
+conversation.md
+PRODUCTION.md
+**/.tenx-source-manifest.json
