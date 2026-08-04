@@ -11,7 +11,9 @@
     <key>signingStyle</key>
     <string>automatic</string>
     <key>destination</key>
-    <string>export</string>
+    <string>upload</string>
+    <key>manageAppVersionAndBuildNumber</key>
+    <false/>
     <key>stripSwiftSymbols</key>
     <true/>
     <key>thinning</key>
