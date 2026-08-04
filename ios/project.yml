@@ -10,7 +10,7 @@ targets:
     settings:
       base:
         PRODUCT_NAME: Evolv
-        PRODUCT_BUNDLE_IDENTIFIER: app.10x.evolv
+        PRODUCT_BUNDLE_IDENTIFIER: com.app.evolv
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: 'Evolv'
         INFOPLIST_KEY_CFBundleName: 'Evolv'

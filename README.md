@@ -20,7 +20,7 @@ press ⌘R to build and run.
 
 ## Bundle
 
-`app.10x.evolv`
+`com.app.evolv`
 
 
 
