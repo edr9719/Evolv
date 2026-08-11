@@ -4,6 +4,7 @@ import Vision
 /// Extracts and normalizes body pose landmarks from an image using VNDetectHumanBodyPoseRequest.
 /// Coordinates are in normalized image space (0–1), with Y flipped to match UIKit (top-left origin).
 enum BodyPoseExtractor {
+    static let bodyPoseRevision = VNDetectHumanBodyPoseRequestRevision1
 
     // Joint mapping: Vision joint → simplified string key stored in NormalizedLandmark
     private static let jointMapping: [(VNHumanBodyPoseObservation.JointName, String)] = [
@@ -49,7 +50,12 @@ enum BodyPoseExtractor {
             throw ExtractionError.insufficientLandmarks
         }
 
-        let bodyHeightPx = computeBodyHeight(landmarks: landmarks, imageHeight: Float(cgImage.height))
+        guard let bodyHeightPx = computeObservedBodyHeight(
+            landmarks: landmarks,
+            imageHeight: Float(cgImage.height)
+        ) else {
+            throw ExtractionError.insufficientLandmarks
+        }
 
         return ExtractedPose(
             scanId: scanId,
@@ -97,7 +103,7 @@ enum BodyPoseExtractor {
             count += 1
         }
 
-        guard count > 0 else { return 0.5 }
+        guard count > 0 else { return 0 }
         let avgDiff = totalDiff / Float(count)
         // Normalize: diff of 20px → 0.5, diff of 0 → 1.0
         return max(0, 1.0 - avgDiff / 40.0)
@@ -106,49 +112,32 @@ enum BodyPoseExtractor {
     // MARK: - Private
 
     private static func detectPose(cgImage: CGImage) async throws -> VNHumanBodyPoseObservation {
-        return try await withCheckedThrowingContinuation { continuation in
-            let request = VNDetectHumanBodyPoseRequest { request, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                    return
-                }
-                guard let obs = request.results?.first as? VNHumanBodyPoseObservation else {
-                    continuation.resume(throwing: ExtractionError.noObservation)
-                    return
-                }
-                continuation.resume(returning: obs)
+        try await Task.detached(priority: .userInitiated) {
+            let request = VNDetectHumanBodyPoseRequest()
+            request.revision = bodyPoseRevision
+            let handler = VNImageRequestHandler(cgImage: cgImage, orientation: .up, options: [:])
+            try handler.perform([request])
+            guard let observation = request.results?.first else {
+                throw ExtractionError.noObservation
             }
-            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-            do {
-                try handler.perform([request])
-            } catch {
-                continuation.resume(throwing: error)
-            }
-        }
+            return observation
+        }.value
     }
 
-    private static func computeBodyHeight(landmarks: [NormalizedLandmark], imageHeight: Float) -> Float {
-        // Try nose → ankle midpoint for full-body height in pixels
-        if let nose = landmarks.first(where: { $0.joint == "nose" }),
-           let lAnkle = landmarks.first(where: { $0.joint == "leftAnkle" }),
-           let rAnkle = landmarks.first(where: { $0.joint == "rightAnkle" }) {
-            let ankleY = (lAnkle.y + rAnkle.y) / 2
-            return abs(ankleY - nose.y) * imageHeight
-        }
-        // Fallback: use hip-to-nose * 1/0.55 ≈ full body
-        if let nose = landmarks.first(where: { $0.joint == "nose" }),
-           let lHip = landmarks.first(where: { $0.joint == "leftHip" }),
-           let rHip = landmarks.first(where: { $0.joint == "rightHip" }) {
-            let hipY = (lHip.y + rHip.y) / 2
-            return abs(hipY - nose.y) * imageHeight / 0.55
-        }
-        // Last resort: shoulder span / 0.22 ≈ body height
-        if let ls = landmarks.first(where: { $0.joint == "leftShoulder" }),
-           let rs = landmarks.first(where: { $0.joint == "rightShoulder" }) {
-            let span = abs(ls.x - rs.x) * imageHeight
-            return span / 0.22
-        }
-        return imageHeight * 0.8 // rough fallback
+    private static func computeObservedBodyHeight(
+        landmarks: [NormalizedLandmark],
+        imageHeight: Float
+    ) -> Float? {
+        let shoulders = landmarks.filter { ["leftShoulder", "rightShoulder"].contains($0.joint) }
+        let hips = landmarks.filter { ["leftHip", "rightHip"].contains($0.joint) }
+        guard !shoulders.isEmpty, !hips.isEmpty else { return nil }
+
+        let upperY = (landmarks.first { $0.joint == "nose" }?.y)
+            ?? shoulders.map(\.y).min()
+        let lowerY = hips.map(\.y).max()
+        guard let upperY, let lowerY else { return nil }
+        let observedHeight = abs(lowerY - upperY) * imageHeight
+        return observedHeight >= 1 ? observedHeight : nil
     }
 
     private static func distance(_ a: NormalizedLandmark, _ b: NormalizedLandmark) -> Float {

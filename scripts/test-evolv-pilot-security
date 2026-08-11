@@ -1,0 +1,154 @@
+#!/bin/zsh
+set -euo pipefail
+
+SCRIPT_DIR=${0:A:h}
+REPO_ROOT=${SCRIPT_DIR:h}
+MIGRATION="$REPO_ROOT/supabase/migrations/20260810000100_pilot_validation.sql"
+ONGOING_MIGRATION="$REPO_ROOT/supabase/migrations/20260810000200_pilot_ongoing_contribution.sql"
+SERVICE_ROLE_MIGRATION="$REPO_ROOT/supabase/migrations/20260811000100_pilot_service_role_access.sql"
+API_SOURCE="$REPO_ROOT/supabase/functions/pilot-api/index.ts"
+SHARED_SOURCE="$REPO_ROOT/supabase/functions/_shared/pilot.ts"
+
+fail() { print -u2 "Pilot security gate failed: $1"; exit 1; }
+stage() { print "Live gate: $1"; }
+CURL_TIMEOUT=(--http1.1 --connect-timeout 10 --max-time 30)
+expect_status() {
+  local expected=$1
+  shift
+  local actual
+  actual=$(curl "${CURL_TIMEOUT[@]}" -sS -o /dev/null -w '%{http_code}' "$@")
+  [[ "$actual" == "$expected" ]] || fail "expected HTTP $expected, received $actual"
+}
+expect_status_eventually() {
+  local expected=$1
+  local attempts=$2
+  shift 2
+  local actual="transport_error"
+  local attempt
+  for (( attempt = 1; attempt <= attempts; attempt++ )); do
+    if actual=$(curl "${CURL_TIMEOUT[@]}" --max-time 15 -sS -o /dev/null -w '%{http_code}' "$@"); then
+      [[ "$actual" == "$expected" ]] && return 0
+    fi
+  done
+  fail "expected HTTP $expected after $attempts safe probe attempts, received $actual"
+}
+
+rg -q "enable row level security" "$MIGRATION" || fail "RLS is not enabled"
+rg -q "force row level security" "$MIGRATION" || fail "RLS is not forced"
+rg -q "revoke all on table storage.objects from public, anon, authenticated" "$MIGRATION" || fail "storage reads are not revoked"
+rg -q "public.*false" "$MIGRATION" || fail "pilot bucket is not private"
+rg -q "consent_object_mismatch" "$MIGRATION" "$API_SOURCE" || fail "consent/file constraint is missing"
+rg -q "createSignedUploadUrl" "$API_SOURCE" || fail "short-lived upload authorization is missing"
+rg -q "deleteParticipantData" "$API_SOURCE" "$SHARED_SOURCE" || fail "withdrawal deletion is missing"
+rg -q "pilot-ongoing-v1" "$ONGOING_MIGRATION" "$API_SOURCE" || fail "separate ongoing consent is missing"
+rg -q "pilot_consistency_required" "$ONGOING_MIGRATION" || fail "ongoing contribution prerequisite is missing"
+rg -q "max_participants" "$ONGOING_MIGRATION" || fail "invite cohort capacity is missing"
+rg -q "to service_role" "$SERVICE_ROLE_MIGRATION" || fail "private pilot tables are unavailable to Edge Functions"
+rg -q "from public, anon, authenticated" "$SERVICE_ROLE_MIGRATION" || fail "private pilot sequences are exposed to client roles"
+rg -q 'route === "health"' "$API_SOURCE" || fail "deployment health contract is missing"
+rg -q 'global:participant' "$SHARED_SOURCE" || fail "participant endpoint lacks a global abuse ceiling"
+rg -q 'storageError.*object_delete_failed' "$SHARED_SOURCE" || fail "retention does not fail closed on storage deletion errors"
+if rg -n "console\.(log|debug|info)|logger\." "$REPO_ROOT/supabase/functions"; then
+  fail "edge functions must not log pilot payloads or URLs"
+fi
+if git -C "$REPO_ROOT" ls-files 'private/pilot/*' | rg -q .; then
+  fail "researcher private files are Git-tracked"
+fi
+if git -C "$REPO_ROOT" grep -n --fixed-strings "BEGIN EC PRIVATE KEY" -- . ':!scripts/test-evolv-pilot-security' >/dev/null; then
+  fail "a private EC key is Git-tracked"
+fi
+print "Static pilot privacy and access-control gates passed."
+
+INVITE=${EVOLV_PILOT_TEST_INVITE:-}
+[[ -n "$INVITE" ]] || {
+  print "Live penetration checks skipped. Set EVOLV_PILOT_TEST_INVITE to a disposable one-use invite."
+  exit 0
+}
+
+API_BASE=${EVOLV_PILOT_API_URL:-https://zaqbnznrfvapbgrjxskv.supabase.co/functions/v1/pilot-api}
+PUBLISHABLE_KEY=${SUPABASE_PUBLISHABLE_KEY:-}
+[[ -n "$PUBLISHABLE_KEY" ]] || fail "SUPABASE_PUBLISHABLE_KEY is required for live checks"
+TEST_DIR=$(mktemp -d)
+trap '[[ "$TEST_DIR" == /var/folders/* || "$TEST_DIR" == /tmp/* ]] && rm -rf -- "$TEST_DIR"' EXIT INT TERM
+HEADERS=(-H "apikey: $PUBLISHABLE_KEY" -H "authorization: Bearer $PUBLISHABLE_KEY" -H 'content-type: application/json')
+
+stage "health contract"
+curl "${CURL_TIMEOUT[@]}" -sS -X POST "${HEADERS[@]}" --data '{}' "$API_BASE/health" > "$TEST_DIR/health.json"
+jq -e '
+  .status == "ok" and
+  .service == "evolv-pilot" and
+  .schemaVersion == 2 and
+  .analysisVersion == 5 and
+  (.consentVersions | sort) == (["pilot-consent-v1", "pilot-ongoing-v1"] | sort)
+' "$TEST_DIR/health.json" >/dev/null || fail "deployed health contract does not match this app"
+
+stage "unauthorized access"
+expect_status 401 -X POST "${HEADERS[@]}" --data '{}' "$API_BASE/status"
+{
+  print -n '{"padding":"'
+  head -c 525000 /dev/zero | tr '\0' 'a'
+  print -n '"}'
+} > "$TEST_DIR/oversized.json"
+stage "payload ceiling"
+expect_status_eventually 413 5 -X POST "${HEADERS[@]}" --data-binary "@$TEST_DIR/oversized.json" "$API_BASE/enroll"
+
+jq -n --arg code "$INVITE" '{invite_code:$code}' > "$TEST_DIR/enroll.json"
+stage "one-use enrollment"
+curl "${CURL_TIMEOUT[@]}" -sS -X POST "${HEADERS[@]}" --data-binary "@$TEST_DIR/enroll.json" "$API_BASE/enroll" > "$TEST_DIR/enrolled.json"
+jq -e '.participant_token and .deletion_code and .participant_id' "$TEST_DIR/enrolled.json" >/dev/null || fail "enrollment did not return opaque credentials"
+TOKEN=$(jq -r '.participant_token' "$TEST_DIR/enrolled.json")
+DELETION_CODE=$(jq -r '.deletion_code' "$TEST_DIR/enrolled.json")
+AUTH=(-H "x-evolv-participant-token: $TOKEN")
+
+expect_status 409 -X POST "${HEADERS[@]}" --data-binary "@$TEST_DIR/enroll.json" "$API_BASE/enroll"
+expect_status 401 -X POST "${HEADERS[@]}" -H 'x-evolv-participant-token: forged-participant-token-that-is-not-valid' --data '{}' "$API_BASE/status"
+
+SESSION_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+SUBMISSION_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+IDEMPOTENCY_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+stage "consistency submission validation and replay"
+jq -n \
+  --arg session "$SESSION_ID" --arg submission "$SUBMISSION_ID" --arg idem "$IDEMPOTENCY_ID" --arg now "$NOW" \
+  '{client_submission_id:$submission,idempotency_key:$idem,consent:{version:"pilot-consent-v1",adult_confirmed:true,share_scope:"results_only",accepted_at:$now},results:{schema_version:1,local_session_id:$session,session_result:"consistent",started_at:$now,completed_at:$now,app_build:"security-test",analysis_version:5,threshold_set_identifier:"engineering-v1",device_model:"test",operating_system_version:"test",camera_position:"front",sets:[]},wrapped_key:null,objects:[]}' > "$TEST_DIR/init.json"
+
+jq '.consent.adult_confirmed=false' "$TEST_DIR/init.json" > "$TEST_DIR/forged-consent.json"
+expect_status 400 -X POST "${HEADERS[@]}" "${AUTH[@]}" --data-binary "@$TEST_DIR/forged-consent.json" "$API_BASE/submissions/init"
+jq '.consent.share_scope="results_and_selected_photos"' "$TEST_DIR/init.json" > "$TEST_DIR/photo-without-selection.json"
+expect_status 400 -X POST "${HEADERS[@]}" "${AUTH[@]}" --data-binary "@$TEST_DIR/photo-without-selection.json" "$API_BASE/submissions/init"
+jq '.objects=[{object_id:"00000000-0000-4000-8000-000000000001",set_number:1,pose:"front",sha256:("a"*64),byte_count:100}] | .wrapped_key={algorithm:"forged"}' "$TEST_DIR/init.json" > "$TEST_DIR/results-with-photo.json"
+expect_status 400 -X POST "${HEADERS[@]}" "${AUTH[@]}" --data-binary "@$TEST_DIR/results-with-photo.json" "$API_BASE/submissions/init"
+
+curl "${CURL_TIMEOUT[@]}" -sS -X POST "${HEADERS[@]}" "${AUTH[@]}" --data-binary "@$TEST_DIR/init.json" "$API_BASE/submissions/init" > "$TEST_DIR/initialized.json"
+REMOTE_SUBMISSION=$(jq -r '.submission_id' "$TEST_DIR/initialized.json")
+[[ "$REMOTE_SUBMISSION" != null ]] || fail "results-only initialization failed"
+curl "${CURL_TIMEOUT[@]}" -sS -X POST "${HEADERS[@]}" "${AUTH[@]}" --data-binary "@$TEST_DIR/init.json" "$API_BASE/submissions/init" > "$TEST_DIR/replayed.json"
+[[ "$(jq -r '.submission_id' "$TEST_DIR/replayed.json")" == "$REMOTE_SUBMISSION" ]] || fail "idempotent replay created a different submission"
+
+jq -n --arg submission "$REMOTE_SUBMISSION" --arg idem "$IDEMPOTENCY_ID" '{submission_id:$submission,idempotency_key:$idem}' > "$TEST_DIR/complete.json"
+curl "${CURL_TIMEOUT[@]}" -sS -X POST "${HEADERS[@]}" "${AUTH[@]}" --data-binary "@$TEST_DIR/complete.json" "$API_BASE/submissions/complete" > "$TEST_DIR/receipt-one.json"
+curl "${CURL_TIMEOUT[@]}" -sS -X POST "${HEADERS[@]}" "${AUTH[@]}" --data-binary "@$TEST_DIR/complete.json" "$API_BASE/submissions/complete" > "$TEST_DIR/receipt-two.json"
+[[ "$(jq -r '.receipt_code' "$TEST_DIR/receipt-one.json")" == "$(jq -r '.receipt_code' "$TEST_DIR/receipt-two.json")" ]] || fail "duplicate completion changed the receipt"
+
+PROGRESS_SESSION=$(uuidgen | tr '[:upper:]' '[:lower:]')
+PROGRESS_SUBMISSION=$(uuidgen | tr '[:upper:]' '[:lower:]')
+PROGRESS_IDEMPOTENCY=$(uuidgen | tr '[:upper:]' '[:lower:]')
+stage "separate ongoing consent"
+jq -n \
+  --arg session "$PROGRESS_SESSION" --arg submission "$PROGRESS_SUBMISSION" --arg idem "$PROGRESS_IDEMPOTENCY" --arg now "$NOW" \
+  '{client_submission_id:$submission,idempotency_key:$idem,consent:{version:"pilot-ongoing-v1",adult_confirmed:true,share_scope:"results_only",accepted_at:$now},results:{schema_version:1,contribution_type:"progress_scan",local_session_id:$session,session_result:"comparable",started_at:$now,completed_at:$now,app_build:"security-test",analysis_version:5,threshold_set_identifier:"engineering-v1",device_model:"test",operating_system_version:"test",camera_position:"front",regions:[],failure_reason_codes_by_pose:{}},wrapped_key:null,objects:[]}' > "$TEST_DIR/progress-init.json"
+jq '.consent.version="pilot-consent-v1"' "$TEST_DIR/progress-init.json" > "$TEST_DIR/progress-wrong-consent.json"
+expect_status 400 -X POST "${HEADERS[@]}" "${AUTH[@]}" --data-binary "@$TEST_DIR/progress-wrong-consent.json" "$API_BASE/submissions/init"
+curl "${CURL_TIMEOUT[@]}" -sS -X POST "${HEADERS[@]}" "${AUTH[@]}" --data-binary "@$TEST_DIR/progress-init.json" "$API_BASE/submissions/init" > "$TEST_DIR/progress-initialized.json"
+PROGRESS_REMOTE=$(jq -r '.submission_id' "$TEST_DIR/progress-initialized.json")
+[[ "$PROGRESS_REMOTE" != null ]] || fail "ongoing results-only initialization failed"
+jq -n --arg submission "$PROGRESS_REMOTE" --arg idem "$PROGRESS_IDEMPOTENCY" '{submission_id:$submission,idempotency_key:$idem}' > "$TEST_DIR/progress-complete.json"
+expect_status 200 -X POST "${HEADERS[@]}" "${AUTH[@]}" --data-binary "@$TEST_DIR/progress-complete.json" "$API_BASE/submissions/complete"
+curl "${CURL_TIMEOUT[@]}" -sS -X POST "${HEADERS[@]}" "${AUTH[@]}" --data '{}' "$API_BASE/status" > "$TEST_DIR/status.json"
+jq -e '.completed_consistency_tests == 1 and .completed_progress_scans == 1' "$TEST_DIR/status.json" >/dev/null || fail "status did not classify consistency and progress submissions"
+
+stage "participant deletion"
+jq -n --arg code "$DELETION_CODE" '{deletion_code:$code}' > "$TEST_DIR/delete.json"
+expect_status 200 -X POST "${HEADERS[@]}" --data-binary "@$TEST_DIR/delete.json" "$API_BASE/delete"
+expect_status 401 -X POST "${HEADERS[@]}" "${AUTH[@]}" --data '{}' "$API_BASE/status"
+print "Live invite reuse, unauthorized access, separate ongoing consent, replay, and deletion gates passed."

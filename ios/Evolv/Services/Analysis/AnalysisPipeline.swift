@@ -1,116 +1,191 @@
 import UIKit
 
-/// Orchestrates the full physique analysis pipeline for a new scan.
-/// Photos are NEVER sent to any network service — only InterpretedSignals leave the device.
+struct AnalysisDependencies {
+    var loadPhoto: (String) -> UIImage?
+    var loadAnalyses: () -> [ScanAnalysis]
+    var saveAnalysis: (ScanAnalysis) -> Void
+    var insightProvider: any InsightRequesting
+    var clock: () -> Date
+    var thresholds: AnalysisThresholdSet
+
+    static let live = AnalysisDependencies(
+        loadPhoto: { PhotoStore.loadImage(named: $0) },
+        loadAnalyses: { AnalysisStore.loadAll() },
+        saveAnalysis: { AnalysisStore.save($0) },
+        insightProvider: NetworkProxy.shared,
+        clock: Date.init,
+        thresholds: .engineeringV1
+    )
+}
+
+/// Orchestrates on-device visual analysis. Missing evidence remains unavailable;
+/// no stage is permitted to fabricate a landmark, a passing result, or a zero.
 @MainActor
 final class AnalysisPipeline {
-
     static let shared = AnalysisPipeline()
-    private init() {}
 
-    private let proxy = NetworkProxy.shared
+    private let dependencies: AnalysisDependencies
 
-    // MARK: - Public API
+    init(dependencies: AnalysisDependencies = .live) {
+        self.dependencies = dependencies
+    }
 
-    /// Runs the full analysis pipeline for a newly captured scan.
-    /// Returns a ScanAnalysis — intermediate version saved before LLM; final version saved after.
     func analyzeNewScan(
         scan: Scan,
         allScans: [Scan],
         measurements: [Measurement],
         profile: UserProfile
     ) async -> ScanAnalysis {
+        let startedAt = dependencies.clock()
         let scanId = scan.id
-        let priorAnalyses = AnalysisStore.loadAll()
-            .filter { prior in allScans.contains { $0.id == prior.id } }
-            .sorted { $0.analyzedAt < $1.analyzedAt }
+        let eligibleDates = Dictionary(uniqueKeysWithValues: allScans
+            .filter(\.isCanonicalProgressScan)
+            .map { ($0.id, $0.date) })
+        let priorAnalyses = dependencies.loadAnalyses()
+            .filter { $0.analysisVersion == AnalysisStore.currentAnalysisVersion }
+            .filter { prior in
+                guard prior.id != scanId, let priorDate = eligibleDates[prior.id] else { return false }
+                return priorDate < scan.date
+            }
+            .sorted { (eligibleDates[$0.id] ?? .distantPast) < (eligibleDates[$1.id] ?? .distantPast) }
+        let baseline = priorAnalyses.first
 
-        // Step 1: Quality gate on all standard captures, pick primary (front) result
-        var qualityResult: QualityGateResult = defaultQualityResult()
+        var assessments: [Pose: CaptureAssessment] = [:]
+        var preparedImages: [Pose: UIImage] = [:]
+        var failures: [String: String] = [:]
+
         for capture in scan.standardCaptures {
-            if let image = PhotoStore.loadImage(named: capture.imageFilename) {
-                let result = await QualityGateEngine.evaluate(image: image, expectedPose: capture.pose)
-                if capture.pose == .front { qualityResult = result }
+            guard let loaded = dependencies.loadPhoto(capture.imageFilename) else {
+                assessments[capture.pose] = .legacyUnverified()
+                failures[capture.pose.rawValue] = "photo_load_failed"
+                continue
+            }
+            let prepared = PhotoStore.prepare(loaded)
+            preparedImages[capture.pose] = prepared.image
+            if let storedAssessment = capture.assessment {
+                assessments[capture.pose] = storedAssessment
+            } else {
+                assessments[capture.pose] = await QualityGateEngine.assessWithTimeout(
+                    image: prepared.image,
+                    expectedPose: capture.pose,
+                    seconds: 5
+                )
             }
         }
 
-        // Step 2: CV — pose extraction + silhouette for each standard capture (sequential)
+        let qualityResult = aggregateQuality(assessments)
+        let cameraMetadata = Dictionary(uniqueKeysWithValues: scan.standardCaptures.compactMap { capture in
+            capture.cameraMetadata.map { (capture.pose, $0) }
+        })
         var extractedPoses: [ExtractedPose] = []
         var silhouetteProfiles: [SilhouetteProfile] = []
 
         for capture in scan.standardCaptures {
-            guard let image = PhotoStore.loadImage(named: capture.imageFilename) else { continue }
-
-            if let pose = try? await BodyPoseExtractor.extract(from: image, pose: capture.pose, scanId: scanId) {
-                let normalized = NormalizationEngine.normalize(pose: pose)
-
-                // Compute pose match score vs last scan's same pose
-                var withMatch = normalized
-                if let priorSamePose = priorAnalyses.last?.extractedPoses.first(where: { $0.pose == capture.pose }) {
-                    let score = NormalizationEngine.computePoseMatchScore(a: normalized, b: priorSamePose)
-                    withMatch.poseMatchScore = score
+            guard let image = preparedImages[capture.pose] else { continue }
+            do {
+                var extracted = try await BodyPoseExtractor.extract(
+                    from: image,
+                    pose: capture.pose,
+                    scanId: scanId
+                )
+                if let baselinePose = baseline?.extractedPoses.first(where: { $0.pose == capture.pose }) {
+                    extracted.poseMatchScore = NormalizationEngine.computePoseMatchScore(
+                        a: extracted,
+                        b: baselinePose
+                    )
                 }
+                // Persist raw image-space landmarks. Normalized landmarks are used
+                // only inside pose matching; mask sampling requires image space.
+                extractedPoses.append(extracted)
 
-                extractedPoses.append(withMatch)
-
-                if let sil = try? await SilhouetteAnalyzer.analyze(image: image, extractedPose: withMatch) {
-                    silhouetteProfiles.append(sil)
+                do {
+                    let silhouette = try await SilhouetteAnalyzer.analyze(
+                        image: image,
+                        extractedPose: extracted
+                    )
+                    if silhouette.supportedRegions?.isEmpty == false {
+                        silhouetteProfiles.append(silhouette)
+                    } else {
+                        failures["\(capture.pose.rawValue)_silhouette"] = "no_supported_regions"
+                    }
+                } catch {
+                    failures["\(capture.pose.rawValue)_silhouette"] = String(describing: error)
                 }
+            } catch {
+                failures[capture.pose.rawValue] = String(describing: error)
             }
         }
 
-        // Step 3: Visual signals
         let visualSignals = VisualSignalEngine.compute(
             currentProfiles: silhouetteProfiles,
-            allScanAnalyses: priorAnalyses
+            allScanAnalyses: priorAnalyses,
+            currentCameraMetadata: cameraMetadata,
+            thresholds: dependencies.thresholds
         )
-
-        // Step 4: Trend smoothing
+        let availability = determineAvailability(
+            isFirstScan: priorAnalyses.isEmpty,
+            profiles: silhouetteProfiles,
+            visualSignals: visualSignals
+        )
         let smoothedSignals = TrendSmoothingEngine.smooth(
             allAnalyses: priorAnalyses,
             currentVisualSignals: visualSignals
         )
-
-        // Step 5: Recomposition patterns
-        let recompPatterns = RecompositionDetector.detect(
+        let patterns = RecompositionDetector.detect(
             smoothed: smoothedSignals,
             measurements: measurements,
             goal: profile.goal
         )
-
-        // Step 6: Measurement alignments + confidence
+        let analyzedAt = dependencies.clock()
         let interpreted = SignalInterpreter.interpret(
             smoothed: smoothedSignals,
             visualSignals: visualSignals,
             measurements: measurements,
             profile: profile,
-            recompositionPatterns: recompPatterns,
+            recompositionPatterns: patterns,
             qualityResult: qualityResult,
+            assessments: assessments,
+            analysisAvailability: availability,
             allAnalyses: priorAnalyses,
-            scanContext: scan.context
+            scanContext: scan.context,
+            thresholds: dependencies.thresholds,
+            now: analyzedAt
         )
 
         let measurementAlignmentScore = ConfidenceEngine.measurementAgreementScore(
             from: interpreted.measurementAlignment
         )
-        let avgPoseMatch = extractedPoses.compactMap(\.poseMatchScore).reduce(0, +)
-            / Float(max(1, extractedPoses.compactMap(\.poseMatchScore).count))
-
+        let poseScores = extractedPoses.compactMap(\.poseMatchScore)
+        let averagePoseMatch = poseScores.isEmpty ? nil : poseScores.reduce(0, +) / Float(poseScores.count)
         let confidence = ConfidenceEngine.compute(
-            scanCount: allScans.count,
+            scanCount: priorAnalyses.count + 1,
             qualityResult: qualityResult,
-            poseMatchScore: avgPoseMatch > 0 ? avgPoseMatch : nil,
+            assessments: assessments,
+            analysisAvailability: availability,
+            poseMatchScore: averagePoseMatch,
             measurementAgreementScore: measurementAlignmentScore,
             allAnalyses: priorAnalyses,
             goal: profile.goal,
-            recompositionPatterns: recompPatterns
+            recompositionPatterns: patterns,
+            regionalComparisons: visualSignals.regionalComparisons,
+            thresholdsValidated: dependencies.thresholds.isValidated,
+            now: analyzedAt
         )
 
-        // Step 7: Build intermediate analysis (no insight yet) and persist
+        let encodedAssessments = Dictionary(uniqueKeysWithValues: assessments.map {
+            ($0.key.rawValue, $0.value)
+        })
+        let metadata = AnalysisAlgorithmMetadata(
+            analysisVersion: AnalysisStore.currentAnalysisVersion,
+            bodyPoseRevision: BodyPoseExtractor.bodyPoseRevision,
+            personSegmentationRevision: SilhouetteAnalyzer.personSegmentationRevision,
+            operatingSystemVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            thresholdSetIdentifier: dependencies.thresholds.identifier
+        )
         let intermediate = ScanAnalysis(
             id: scanId,
             analysisVersion: AnalysisStore.currentAnalysisVersion,
-            analyzedAt: Date(),
+            analyzedAt: analyzedAt,
             qualityResult: qualityResult,
             extractedPoses: extractedPoses,
             silhouetteProfiles: silhouetteProfiles,
@@ -118,41 +193,69 @@ final class AnalysisPipeline {
             smoothedSignals: smoothedSignals,
             confidence: confidence,
             interpretedSignals: interpreted,
-            generatedInsight: nil
+            generatedInsight: nil,
+            captureAssessments: encodedAssessments,
+            analysisAvailability: availability,
+            poseFailures: failures.isEmpty ? nil : failures,
+            algorithmMetadata: metadata,
+            captureCameraMetadata: Dictionary(uniqueKeysWithValues: cameraMetadata.map {
+                ($0.key.rawValue, $0.value)
+            })
         )
-        AnalysisStore.save(intermediate)
+        dependencies.saveAnalysis(intermediate)
 
-        // Step 8: LLM insight (async, non-blocking after intermediate save)
-        let insight = await InsightEngine.generateInsight(signals: interpreted, networkProxy: proxy)
-
-        let final_ = ScanAnalysis(
-            id: scanId,
-            analysisVersion: AnalysisStore.currentAnalysisVersion,
-            analyzedAt: intermediate.analyzedAt,
-            qualityResult: qualityResult,
-            extractedPoses: extractedPoses,
-            silhouetteProfiles: silhouetteProfiles,
-            visualSignals: visualSignals,
-            smoothedSignals: smoothedSignals,
-            confidence: confidence,
-            interpretedSignals: interpreted,
-            generatedInsight: insight
+        let insight = await InsightEngine.generateInsight(
+            signals: interpreted,
+            networkProxy: dependencies.insightProvider,
+            allowCloud: profile.usesCloudInsights,
+            now: analyzedAt
         )
-        AnalysisStore.save(final_)
+        var final = intermediate
+        final.generatedInsight = insight
+        dependencies.saveAnalysis(final)
 
-        return final_
+        _ = analyzedAt.timeIntervalSince(startedAt) // retained for fixture report clocks
+        return final
     }
 
-    // MARK: - Helpers
+    private func determineAvailability(
+        isFirstScan: Bool,
+        profiles: [SilhouetteProfile],
+        visualSignals: VisualSignalSet
+    ) -> AnalysisAvailability {
+        if isFirstScan { return .baselineOnly }
+        guard !profiles.isEmpty else { return .processingFailed }
+        let supported = visualSignals.regionalComparisons?.contains { $0.status != .unavailable } == true
+        return supported ? .comparable : .partialEvidence
+    }
 
-    private func defaultQualityResult() -> QualityGateResult {
-        QualityGateResult(
-            verdict: .pass,
-            issues: [],
-            blurScore: 100,
-            brightnessScore: 0.5,
-            coverageScore: 0.7,
-            regionalCoverage: [:]
+    private func aggregateQuality(_ assessments: [Pose: CaptureAssessment]) -> QualityGateResult {
+        let values = Pose.required.compactMap { assessments[$0] }
+        guard !values.isEmpty else {
+            return QualityGateEngine.qualityResult(
+                from: QualityGateEngine.unavailableAssessment(reason: "no_capture_assessments")
+            )
+        }
+        let issues = Array(Set(values.flatMap(\.confirmedIssues)))
+        let brightness = values.map(\.brightnessScore).reduce(0, +) / Float(values.count)
+        let coverage = values.map(\.coverageScore).reduce(0, +) / Float(values.count)
+        let verdict: QualityVerdict = issues.isEmpty ? .pass : .warning(issues)
+        return QualityGateResult(
+            verdict: verdict,
+            issues: issues,
+            blurScore: 0,
+            brightnessScore: brightness,
+            coverageScore: coverage,
+            regionalCoverage: [
+                "shoulders": minimumEvidence(.shoulders, values),
+                "torso": min(minimumEvidence(.chest, values), minimumEvidence(.waist, values)),
+                "arms": minimumEvidence(.arms, values),
+                "sideTorso": assessments[.side]?.regionEvidence[.sideTorso]?.state == .supported ? 1 : 0
+            ]
         )
+    }
+
+    private func minimumEvidence(_ region: CaptureRegion, _ assessments: [CaptureAssessment]) -> Float {
+        assessments.allSatisfy { $0.regionEvidence[region]?.state == .supported } ? 1 : 0
     }
 }

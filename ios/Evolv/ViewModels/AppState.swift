@@ -3,9 +3,22 @@ import SwiftUI
 
 @Observable
 final class AppState {
+    enum PersistenceError: LocalizedError {
+        case couldNotEncode
+        case couldNotSave
+
+        var errorDescription: String? {
+            switch self {
+            case .couldNotEncode: return "Evolv couldn't prepare the updated scan."
+            case .couldNotSave: return "Evolv couldn't save the updated scan to this device."
+            }
+        }
+    }
+
     var profile = UserProfile()
     var measurements: [Measurement] = []
     var scans: [Scan] = []
+    var validationSessions: [ValidationStudySession] = []
     var hasCompletedOnboarding: Bool = false
 
     // Analysis state — not persisted in state.json; AnalysisStore owns the JSON files
@@ -20,24 +33,32 @@ final class AppState {
 
     init() {
         load()
+        validationSessions = (try? ValidationStudyStore.load()) ?? []
+        refreshValidationSessionEligibility()
+        protectExistingData()
         PurchaseService.shared.bind(to: profile)
-        // Load the most recent analysis from disk (background to avoid blocking launch)
-        if let latestScanId = scans.sorted(by: { $0.date < $1.date }).last?.id {
-            Task.detached(priority: .background) { [weak self] in
-                let analysis = AnalysisStore.load(scanId: latestScanId)
-                await MainActor.run { self?.latestAnalysis = analysis }
+        // Re-run canonical scans when evidence rules change; otherwise load the
+        // most recent analysis from disk without blocking launch.
+        if let firstOutdated = canonicalScans.first(where: { AnalysisStore.needsReanalysis(scanId: $0.id) }) {
+            analyzeCanonicalScans(startingAt: firstOutdated.date)
+        } else if let latestScanId = canonicalScans.last?.id {
+            Task { @MainActor [weak self] in
+                let analysis = await Task.detached(priority: .background) {
+                    AnalysisStore.load(scanId: latestScanId)
+                }.value
+                self?.latestAnalysis = analysis
             }
         }
     }
 
     var calibrationState: CalibrationState {
-        guard let analysis = latestAnalysis else {
-            return scans.isEmpty ? .noScans : .baselineSet
+        guard let analysis = latestAnalysis, analysis.analysisVersion >= AnalysisStore.currentAnalysisVersion else {
+            return canonicalScans.isEmpty ? .noScans : .baselineSet
         }
         return CalibrationState.from(
             tier: analysis.smoothedSignals.reliabilityTier,
             confidence: analysis.confidence.overall,
-            scanCount: scans.count
+            scanCount: canonicalScans.count
         )
     }
 
@@ -65,10 +86,65 @@ final class AppState {
     // MARK: - Derived data
 
     var sortedScans: [Scan] { scans.sorted { $0.date < $1.date } }
-    var latestScan: Scan? { sortedScans.last }
-    var firstScan: Scan? { sortedScans.first }
+    var canonicalScans: [Scan] {
+        sortedScans.filter(\.isCanonicalProgressScan)
+    }
+    var latestScan: Scan? { canonicalScans.last }
+    var firstScan: Scan? { canonicalScans.first }
+    var latestStoredScan: Scan? { sortedScans.last }
+    var latestValidationSession: ValidationStudySession? {
+        validationSessions.max { $0.startedAt < $1.startedAt }
+    }
+    var activeValidationSession: ValidationStudySession? {
+        validationSessions
+            .filter { $0.status == .active || $0.status == .evaluating }
+            .max { $0.startedAt < $1.startedAt }
+    }
 
     var hasAnyScans: Bool { !scans.isEmpty }
+
+    func scan(id: UUID) -> Scan? { scans.first { $0.id == id } }
+
+    func canonicalScan(on date: Date, calendar: Calendar = .current) -> Scan? {
+        canonicalScans.last { calendar.isDate($0.date, inSameDayAs: date) }
+    }
+
+    var todayCanonicalScan: Scan? { canonicalScan(on: Date()) }
+
+    func eligibleValidationAnchor(now: Date = Date()) -> Scan? {
+        guard let scan = canonicalScan(on: now),
+              ValidationStudyPolicy.eligibleCanonicalAnchor(scan, now: now) else {
+            return nil
+        }
+        return scan
+    }
+
+    var nextRecommendedScanDate: Date? {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        switch profile.cadence {
+        case .daily:
+            return calendar.date(byAdding: .day, value: 1, to: today)
+        case .weekly:
+            let weekday = profile.effectiveScanWeekdays.first ?? profile.scanWeekday
+            var components = DateComponents()
+            components.weekday = weekday
+            return calendar.nextDate(
+                after: today,
+                matching: components,
+                matchingPolicy: .nextTime,
+                direction: .forward
+            )
+        case .biweekly:
+            let anchor = latestScan?.date ?? today
+            return calendar.date(byAdding: .day, value: 14, to: calendar.startOfDay(for: anchor))
+        case .monthly:
+            let base = calendar.date(byAdding: .month, value: 1, to: today) ?? today
+            var components = calendar.dateComponents([.year, .month], from: base)
+            components.day = min(28, max(1, profile.scanDayOfMonth))
+            return calendar.date(from: components)
+        }
+    }
 
     /// Weeks tracked from first scan to today (min 0).
     var weeksTracked: Int {
@@ -82,7 +158,7 @@ final class AppState {
     }
 
     var currentStreak: Int {
-        guard !scans.isEmpty else { return 0 }
+        guard !canonicalScans.isEmpty else { return 0 }
         let cal = Calendar.current
         let bucket: Calendar.Component = {
             switch profile.cadence {
@@ -91,7 +167,7 @@ final class AppState {
             case .monthly: return .month
             }
         }()
-        let sorted = scans.map { $0.date }.sorted(by: >)
+        let sorted = canonicalScans.map { $0.date }.sorted(by: >)
         var streak = 1
         var cursor = sorted[0]
         let step = profile.cadence == .biweekly ? 2 : 1
@@ -106,88 +182,34 @@ final class AppState {
         return streak
     }
 
-    // MARK: - Consistency scoring (real, image-derived)
+    // MARK: - Legacy score compatibility
 
-    /// Computes a 0–100 consistency score for a new scan vs the existing baseline scan.
-    /// Considers lighting (brightness delta) and framing (aspect ratio delta).
+    /// Numeric scores are retained only so old JSON remains decodable. Aspect
+    /// ratio is not body framing, so new scans never invent these values.
     func computeConsistency(forNew captures: [PoseCapture]) -> (consistency: Int, lighting: Int, framing: Int) {
-        guard let baseline = firstScan else {
-            // First scan ever — set baseline. Treat as solid but not perfect.
-            return (consistency: 80, lighting: 85, framing: 85)
-        }
-        // Compare each standard pose against the baseline's pose
-        var lightingDeltas: [Double] = []
-        var framingDeltas: [Double] = []
-        for c in captures where c.pose.category == .standard {
-            if let base = baseline.capture(for: c.pose) {
-                lightingDeltas.append(abs(c.avgBrightness - base.avgBrightness))
-                framingDeltas.append(abs(c.aspectRatio - base.aspectRatio))
-            }
-        }
-        if lightingDeltas.isEmpty {
-            return (consistency: 70, lighting: 75, framing: 75)
-        }
-        let avgLightDelta = lightingDeltas.reduce(0, +) / Double(lightingDeltas.count)
-        let avgFrameDelta = framingDeltas.reduce(0, +) / Double(framingDeltas.count)
-
-        // Map deltas to scores. 0 delta = 100, larger = lower.
-        let lighting = max(30, min(100, Int((1.0 - avgLightDelta * 2.2) * 100)))
-        let framing  = max(30, min(100, Int((1.0 - avgFrameDelta * 3.0) * 100)))
-        let consistency = Int((Double(lighting) * 0.55 + Double(framing) * 0.45).rounded())
-        return (consistency, lighting, framing)
+        (consistency: 0, lighting: 0, framing: 0)
     }
 
     // MARK: - Progress score (data-driven)
 
     var progressScore: ProgressScore {
-        guard scans.count >= 2,
-              let first = firstScan,
-              let last = latestScan else {
-            if scans.count == 1 {
-                return ProgressScore(value: 38, monthlyDelta: 0, weeklyDelta: 0, momentum: "Baseline set")
-            }
+        guard !canonicalScans.isEmpty else {
             return ProgressScore(value: 0, monthlyDelta: 0, weeklyDelta: 0, momentum: "Awaiting baseline")
         }
-
-        let baseW = measurements.first?.weightKg ?? profile.weightKg
-        let latestW = measurements.last?.weightKg ?? profile.weightKg
-        let weightShift = latestW - baseW
-
-        let consistencyAvg = Double(scans.map(\.consistencyScore).reduce(0, +)) / Double(scans.count)
-
-        let goalAligned: Double = {
-            switch profile.goal {
-            case .muscleGain: return max(-2, min(2, weightShift)) * 4
-            case .fatLoss:    return max(-2, min(2, -weightShift)) * 4
-            case .recomp:     return (2 - min(2, abs(weightShift))) * 3
-            case .maintain:   return (2 - min(2, abs(weightShift))) * 3
-            }
-        }()
-
-        let weeks = Double(Calendar.current.dateComponents([.weekOfYear], from: first.date, to: last.date).weekOfYear ?? 0)
-        let visual = min(20, weeks * 1.2) * (consistencyAvg / 100.0)
-
-        let raw = 45 + goalAligned + visual + (consistencyAvg - 60) * 0.25
-        let value = max(0, min(100, Int(raw.rounded())))
-
-        let sortedS = sortedScans
-        let weeklyDelta: Int = {
-            guard sortedS.count >= 2 else { return 0 }
-            return (sortedS.last!.consistencyScore - sortedS[sortedS.count - 2].consistencyScore) / 6
-        }()
-
-        let monthlyDelta: Int = {
-            guard sortedS.count >= 4 else { return weeklyDelta * 2 }
-            let oldIdx = max(0, sortedS.count - 5)
-            return (sortedS.last!.consistencyScore - sortedS[oldIdx].consistencyScore) / 3
-        }()
-
-        let momentum: String
-        if weeklyDelta > 2 { momentum = "Building" }
-        else if weeklyDelta < -2 { momentum = "Slowing" }
-        else { momentum = "Steady" }
-
-        return ProgressScore(value: value, monthlyDelta: monthlyDelta, weeklyDelta: weeklyDelta, momentum: momentum)
+        guard canonicalScans.count > 1 else {
+            return ProgressScore(value: 0, monthlyDelta: 0, weeklyDelta: 0, momentum: "Baseline set")
+        }
+        guard let analysis = latestAnalysis,
+              analysis.analysisAvailability == .comparable,
+              analysis.confidence.hasSufficientEvidence == true else {
+            return ProgressScore(value: 0, monthlyDelta: 0, weeklyDelta: 0, momentum: "Building evidence")
+        }
+        return ProgressScore(
+            value: Int((analysis.confidence.rawScore * 100).rounded()),
+            monthlyDelta: 0,
+            weeklyDelta: 0,
+            momentum: "Evidence ready"
+        )
     }
 
     // MARK: - Estimated deltas (data-driven, honest)
@@ -195,16 +217,7 @@ final class AppState {
     var estimatedDeltas: [EstimatedDelta] {
         // Need baseline + recent measurement, otherwise return informational placeholders
         guard let baseline = measurements.first, measurements.count >= 2,
-              let latest = measurements.last else {
-            if !measurements.isEmpty {
-                return [
-                    EstimatedDelta(label: "Arms", unit: "cm", value: 0, status: .stable, note: "Add a follow-up measurement to estimate change"),
-                    EstimatedDelta(label: "Chest", unit: "cm", value: 0, status: .stable, note: nil),
-                    EstimatedDelta(label: "Waist", unit: "cm", value: 0, status: .stable, note: nil)
-                ]
-            }
-            return []
-        }
+              let latest = measurements.last else { return [] }
 
         func delta(_ a: Double?, _ b: Double?) -> Double? {
             guard let a, let b else { return nil }
@@ -222,21 +235,8 @@ final class AppState {
             let dir: GoalDir = (profile.goal == .muscleGain || profile.goal == .maintain) ? .neutral : .down
             out.append(makeDelta(label: "Waist", unit: "cm", value: d, goalDirection: dir))
         }
-
-        // Visual muscularity proxy from time elapsed + scan consistency
-        let weeks = Double(Calendar.current.dateComponents([.weekOfYear], from: (firstScan?.date ?? Date()), to: (latestScan?.date ?? Date())).weekOfYear ?? 0)
-        let cAvg = scans.isEmpty ? 50 : Double(scans.map(\.consistencyScore).reduce(0, +)) / Double(scans.count)
-        let visual = (weeks * 0.5) * (cAvg / 100.0)
-        let visualVal = (visual * 10).rounded() / 10
-        let visualStatus: TrendStatus = visualVal > 1.5 ? .improving : (visualVal < -0.5 ? .stalled : .stable)
-        if scans.count >= 2 {
-            out.append(EstimatedDelta(
-                label: "Visual muscularity",
-                unit: "%",
-                value: visualVal,
-                status: visualStatus,
-                note: visualVal == 0 ? "No detectable visual change yet" : nil
-            ))
+        if let d = delta(baseline.thighs, latest.thighs) {
+            out.append(makeDelta(label: "Thighs (measurement)", unit: "cm", value: d, goalDirection: .up))
         }
         return out
     }
@@ -261,112 +261,163 @@ final class AppState {
     // MARK: - Weekly AI summary (data-driven, honest)
 
     var weeklySummary: WeeklySummary {
-        let avgConsistency = scans.isEmpty ? 0 : scans.map(\.consistencyScore).reduce(0, +) / scans.count
-        let conf: Confidence = avgConsistency > 78 ? .high : (avgConsistency > 55 ? .medium : .low)
-
-        if scans.isEmpty {
+        if canonicalScans.isEmpty {
             return WeeklySummary(
                 headline: "Capture your first scan to begin.",
                 detail: "Your first scan becomes the baseline Evolv quietly compares everything against.",
-                confidence: .medium
+                confidence: .low
             )
         }
-        if scans.count == 1 {
+        if canonicalScans.count == 1 {
+            let unavailable = latestScan?.recommendedRepairPoses ?? []
+            let detail: String
+            if unavailable.isEmpty {
+                detail = "No progress result is calculated from one scan. Capture another complete upper-body scan to create a comparison."
+            } else {
+                detail = "Your baseline is saved. Automatic checks were unavailable for \(poseList(unavailable)); this does not mean those photos are poor."
+            }
             return WeeklySummary(
                 headline: "Baseline captured.",
-                detail: "Keep scan conditions consistent. Meaningful trends typically emerge after 3–4 scans.",
-                confidence: .medium
+                detail: detail,
+                confidence: .low
             )
         }
-
-        let latest = latestScan!
-        let prev = sortedScans[sortedScans.count - 2]
-        let lightingDrop = latest.lightingScore < prev.lightingScore - 12
-
-        if lightingDrop || avgConsistency < 55 {
+        if analysisPending {
             return WeeklySummary(
-                headline: "Progress visibility is limited due to inconsistent scan conditions.",
-                detail: "Lighting or framing has shifted from your baseline. Try matching the same room, time of day, and distance to sharpen the read.",
+                headline: "Analyzing supported regions.",
+                detail: "Evolv will leave any region without enough evidence unavailable instead of guessing.",
+                confidence: .low
+            )
+        }
+        guard let analysis = latestAnalysis else {
+            return WeeklySummary(
+                headline: "Analysis is unavailable.",
+                detail: "Your photos remain saved, but Evolv has not produced a supported progress result.",
                 confidence: .low
             )
         }
 
-        let deltas = estimatedDeltas
-        let p = progressScore
-
-        // Measurement-led narratives
-        if let waist = deltas.first(where: { $0.label == "Waist" }), waist.status == .improving,
-           profile.goal != .muscleGain {
+        guard analysis.analysisVersion >= AnalysisStore.currentAnalysisVersion else {
             return WeeklySummary(
-                headline: "Waist measurements decreased while weight remained near baseline.",
-                detail: "This pattern often suggests recomposition. Keep training intensity steady to preserve muscle.",
-                confidence: conf
+                headline: "Capture a new verified baseline.",
+                detail: "Older scans remain saved, but their legacy quality scores are not treated as current evidence.",
+                confidence: .low
             )
         }
 
-        if let arms = deltas.first(where: { $0.label == "Arms" }), arms.status == .improving {
+        if analysis.analysisAvailability == .partialEvidence || analysis.analysisAvailability == .processingFailed {
+            let unavailable = latestScan?.recommendedRepairPoses ?? []
             return WeeklySummary(
-                headline: "Your upper body appears slightly fuller than your baseline.",
-                detail: "Arms are trending up. Visual change tends to lag measurement change by 2–3 weeks.",
-                confidence: conf
+                headline: "Comparison saved with limited automatic analysis.",
+                detail: unavailable.isEmpty
+                    ? "Unsupported regions were excluded instead of guessed. Your photos remain saved."
+                    : "Unsupported regions were excluded. You can review \(poseList(unavailable)) without replacing the rest of this scan.",
+                confidence: .low
             )
         }
 
-        if p.weeklyDelta < -2 || (deltas.allSatisfy { $0.status == .stable } && deltas.count >= 2) {
+        if let insight = analysis.generatedInsight {
             return WeeklySummary(
-                headline: "No meaningful visual change detected yet.",
-                detail: "This isn't unusual — visible physique change is slow. Stay consistent with capture conditions and training load.",
-                confidence: conf
+                headline: insight.headline,
+                detail: insight.detail,
+                confidence: analysis.confidence.hasSufficientEvidence == true ? insight.confidence : .low
             )
         }
 
         return WeeklySummary(
-            headline: "Your physique appears stable this period.",
-            detail: "Strength is likely increasing faster than visible muscularity right now. Trust the process.",
-            confidence: conf
+            headline: "Building comparable evidence.",
+            detail: "No supported progress claim is available yet.",
+            confidence: .low
         )
     }
 
     // MARK: - Actions
 
-    /// Adds a real scan from captured pose images and triggers background analysis.
-    func addScan(captures: [PoseCapture]) {
-        let scores = computeConsistency(forNew: captures)
-        let scan = Scan(
-            date: Date(),
-            captures: captures,
-            consistencyScore: scores.consistency,
-            lightingScore: scores.lighting,
-            framingScore: scores.framing,
-            note: nil,
-            context: nil
-        )
-        scans.append(scan)
-        save()
+    private func poseList(_ poses: [Pose]) -> String {
+        let labels = poses.map(\.shortLabel)
+        if labels.count <= 1 { return labels.first ?? "the affected pose" }
+        if labels.count == 2 { return labels.joined(separator: " and ") }
+        return labels.dropLast().joined(separator: ", ") + ", and " + (labels.last ?? "")
+    }
 
-        // Trigger analysis pipeline asynchronously
-        analysisPending = true
-        let allScans = scans
-        let allMeasurements = measurements
-        let userProfile = profile
-        Task {
-            let analysis = await AnalysisPipeline.shared.analyzeNewScan(
-                scan: scan,
-                allScans: allScans,
-                measurements: allMeasurements,
-                profile: userProfile
-            )
-            await MainActor.run {
-                self.latestAnalysis = analysis
-                self.analysisPending = false
-            }
+    /// Adds a complete scan. Same-day extras are saved for documentation but
+    /// are intentionally excluded from progress analysis.
+    @discardableResult
+    func addScan(captures: [PoseCapture], role: ScanRole = .canonical) throws -> UUID {
+        guard ScanCaptureValidator.hasAllRequiredPoses(captures) else {
+            throw PersistenceError.couldNotSave
         }
+
+        let now = Date()
+        let resolvedRole = ScanSchedulingPolicy.resolvedRole(
+            requested: role,
+            on: now,
+            existingScans: scans
+        )
+        let isFirstCanonical = canonicalScans.isEmpty && resolvedRole == .canonical
+        let scan = Scan(
+            date: now,
+            captures: captures,
+            consistencyScore: 0,
+            lightingScore: 0,
+            framingScore: 0,
+            note: nil,
+            context: nil,
+            analysisAvailability: resolvedRole == .canonical
+                ? (isFirstCanonical ? .baselineOnly : .partialEvidence)
+                : (resolvedRole == .sameDayExtra ? .documentationOnly : .validationOnly),
+            captureCompleteness: .complete,
+            scanRole: resolvedRole,
+            lastModifiedAt: now
+        )
+        var candidate = scans
+        candidate.append(scan)
+        try persist(scans: candidate)
+        scans = candidate
+        NotificationManager.sync(with: profile)
+
+        if resolvedRole == .canonical { analyzeCanonicalScans(startingAt: scan.date) }
+        return scan.id
+    }
+
+    /// Atomically replaces selected poses. Existing files remain referenced
+    /// until the updated state file is safely on disk.
+    @discardableResult
+    func replaceCaptures(in scanID: UUID, with replacements: [PoseCapture]) throws -> Scan {
+        guard let index = scans.firstIndex(where: { $0.id == scanID }), !replacements.isEmpty else {
+            throw PersistenceError.couldNotSave
+        }
+        var updated = scans[index]
+        let merge = ScanCaptureMerge.replacing(updated.captures, with: replacements)
+        updated.captures = merge.captures
+        updated.captureCompleteness = ScanCaptureValidator.hasAllRequiredPoses(updated.captures) ? .complete : .incomplete
+        updated.lastModifiedAt = Date()
+        if updated.isCanonicalProgressScan {
+            updated.analysisAvailability = updated.id == firstScan?.id ? .baselineOnly : .partialEvidence
+        }
+
+        var candidate = scans
+        candidate[index] = updated
+        try persist(scans: candidate)
+        scans = candidate
+        PhotoStore.delete(named: merge.supersededFilenames)
+        NotificationManager.sync(with: profile)
+
+        if updated.isCanonicalProgressScan {
+            analyzeCanonicalScans(startingAt: updated.date)
+        }
+        invalidateValidationSession(containing: updated.id, reason: .scanModifiedAfterSet)
+        return updated
     }
 
     /// Updates the scan context (pre-workout, fasted, hydration) on the most recently added scan.
     func updateLatestScanContext(preWorkout: Bool?, fasted: Bool?, hydration: HydrationState?) {
-        guard !scans.isEmpty else { return }
-        let idx = scans.count - 1
+        guard let id = latestStoredScan?.id else { return }
+        updateScanContext(scanID: id, preWorkout: preWorkout, fasted: fasted, hydration: hydration)
+    }
+
+    func updateScanContext(scanID: UUID, preWorkout: Bool?, fasted: Bool?, hydration: HydrationState?) {
+        guard let idx = scans.firstIndex(where: { $0.id == scanID }) else { return }
         let scan = scans[idx]
         scans[idx].context = ScanContext(
             timestamp: scan.date,
@@ -379,18 +430,22 @@ final class AppState {
     }
 
     func deleteScan(_ scan: Scan) {
-        for c in scan.captures {
-            PhotoStore.delete(named: c.imageFilename)
-        }
+        let candidate = scans.filter { $0.id != scan.id }
+        guard (try? persist(scans: candidate)) != nil else { return }
+        scans = candidate
+        PhotoStore.delete(named: scan.captures.map(\.imageFilename))
         AnalysisStore.delete(scanId: scan.id)
-        scans.removeAll { $0.id == scan.id }
         // Update latestAnalysis to the new latest scan's analysis (if any)
-        if let newLatestId = scans.sorted(by: { $0.date < $1.date }).last?.id {
+        if let newLatestId = canonicalScans.last?.id {
             latestAnalysis = AnalysisStore.load(scanId: newLatestId)
         } else {
             latestAnalysis = nil
         }
-        save()
+        NotificationManager.sync(with: profile)
+        if scan.isCanonicalProgressScan, let firstRemaining = canonicalScans.first {
+            analyzeCanonicalScans(startingAt: firstRemaining.date)
+        }
+        invalidateValidationSession(containing: scan.id, reason: .scanDeletedAfterSet)
     }
 
     func addMeasurement(_ m: Measurement) {
@@ -415,6 +470,9 @@ final class AppState {
             AnalysisStore.delete(scanId: s.id)
         }
         scans = []
+        deleteValidationDraftPhotos()
+        validationSessions = []
+        ValidationStudyStore.deleteAll()
         measurements = []
         profile = UserProfile()
         hasCompletedOnboarding = false
@@ -433,23 +491,43 @@ final class AppState {
     }
 
     func save() {
-        let p = Persisted(profile: profile, measurements: measurements, scans: scans, hasCompletedOnboarding: hasCompletedOnboarding)
-        if let data = try? JSONEncoder().encode(p) {
-            try? data.write(to: Self.stateURL, options: .atomic)
-        }
+        try? persist(scans: scans)
         NotificationManager.sync(with: profile)
+    }
+
+    private func persist(
+        scans candidateScans: [Scan],
+        measurements candidateMeasurements: [Measurement]? = nil
+    ) throws {
+        let p = Persisted(
+            profile: profile,
+            measurements: candidateMeasurements ?? measurements,
+            scans: candidateScans,
+            hasCompletedOnboarding: hasCompletedOnboarding
+        )
+        guard let data = try? JSONEncoder().encode(p) else {
+            throw PersistenceError.couldNotEncode
+        }
+        do {
+            try data.write(to: Self.stateURL, options: [.atomic, .completeFileProtection])
+        } catch {
+            throw PersistenceError.couldNotSave
+        }
     }
 
     /// Erase every scan + measurement but keep profile + onboarding state.
     func deleteAllScanData() {
-        for s in scans {
-            for c in s.captures {
-                PhotoStore.delete(named: c.imageFilename)
-            }
-        }
+        let storedScans = scans
+        guard (try? persist(scans: [], measurements: [])) != nil else { return }
+        for s in storedScans { PhotoStore.delete(named: s.captures.map(\.imageFilename)) }
+        AnalysisStore.deleteAll()
+        deleteValidationDraftPhotos()
+        validationSessions = []
+        ValidationStudyStore.deleteAll()
         scans = []
         measurements = []
-        save()
+        latestAnalysis = nil
+        analysisPending = false
     }
 
     private func load() {
@@ -460,5 +538,425 @@ final class AppState {
         self.scans = p.scans
         self.hasCompletedOnboarding = p.hasCompletedOnboarding
         PurchaseService.shared.bind(to: profile)
+    }
+
+    private func protectExistingData() {
+        PhotoStore.protectExistingFiles()
+        AnalysisStore.protectExistingFiles()
+        ValidationStudyStore.protectExistingFile()
+        if FileManager.default.fileExists(atPath: Self.stateURL.path) {
+            try? FileManager.default.setAttributes(
+                [.protectionKey: FileProtectionType.complete],
+                ofItemAtPath: Self.stateURL.path
+            )
+        }
+    }
+
+    // MARK: - Local consistency test
+
+    @discardableResult
+    func startValidationSession(
+        cameraPosition: CaptureCameraPosition,
+        useEligibleCanonical: Bool,
+        pilotEnrollment: PilotLocalEnrollment? = PilotStudyStore.loadEnrollment(),
+        now: Date = Date()
+    ) throws -> UUID {
+        refreshValidationSessionEligibility(now: now)
+        guard activeValidationSession == nil else {
+            throw ValidationStudyError.activeSessionExists
+        }
+
+        var candidateScans = scans
+        var records: [ValidationSetRecord] = []
+        var lockedLensType: String?
+        var protocolStartedAt = now
+        let sessionID = UUID()
+
+        if useEligibleCanonical {
+            guard let anchor = eligibleValidationAnchor(now: now),
+                  let metadata = ValidationStudyPolicy.cameraConfiguration(for: anchor.captures),
+                  metadata.position == cameraPosition,
+                  let scanIndex = candidateScans.firstIndex(where: { $0.id == anchor.id }) else {
+                throw ValidationStudyError.eligibleAnchorUnavailable
+            }
+            candidateScans[scanIndex].validationSessionID = sessionID
+            candidateScans[scanIndex].validationSetNumber = 1
+            candidateScans[scanIndex].lastModifiedAt = now
+            records.append(ValidationSetRecord(
+                setNumber: 1,
+                scanID: anchor.id,
+                completedAt: anchor.date,
+                conditions: nil,
+                comparison: nil,
+                usedExistingCanonicalScan: true
+            ))
+            lockedLensType = metadata.lensType
+            protocolStartedAt = anchor.date
+        }
+
+        let session = ValidationStudySession(
+            id: sessionID,
+            enrollment: ValidationEnrollment(
+                enrolledAt: now,
+                programVersion: ValidationStudySession.protocolVersion,
+                shareScope: pilotEnrollment?.status == .active
+                    ? pilotEnrollment?.consent.shareScope.validationScope ?? .localOnly
+                    : .localOnly,
+                consentVersion: pilotEnrollment?.status == .active
+                    ? pilotEnrollment?.consent.version
+                    : nil
+            ),
+            startedAt: protocolStartedAt,
+            expiresAt: protocolStartedAt.addingTimeInterval(ValidationStudySession.maximumDuration),
+            status: .active,
+            lockedCameraPosition: cameraPosition,
+            lockedLensType: lockedLensType,
+            sets: records,
+            draftSetNumber: nil,
+            draftCaptures: [],
+            result: nil,
+            statusReasons: [],
+            completedAt: nil
+        )
+        let candidateSessions = validationSessions + [session]
+
+        if useEligibleCanonical {
+            try persist(scans: candidateScans)
+        }
+        do {
+            try ValidationStudyStore.save(candidateSessions)
+        } catch {
+            if useEligibleCanonical { try? persist(scans: scans) }
+            throw error
+        }
+        scans = candidateScans
+        validationSessions = candidateSessions
+        return sessionID
+    }
+
+    func validationSession(id: UUID) -> ValidationStudySession? {
+        validationSessions.first { $0.id == id }
+    }
+
+    func validationScans(sessionID: UUID) -> [Scan] {
+        scans
+            .filter { $0.validationSessionID == sessionID }
+            .sorted { ($0.validationSetNumber ?? 0) < ($1.validationSetNumber ?? 0) }
+    }
+
+    func validationCaptureContext(sessionID: UUID) -> ValidationCaptureContext? {
+        refreshValidationSessionEligibility()
+        guard let session = validationSession(id: sessionID),
+              session.status == .active,
+              session.awaitingConditionsSetNumber == nil,
+              !session.isComplete else { return nil }
+        let setNumber = session.nextSetNumber
+        let initial = session.draftSetNumber == setNumber ? session.draftCaptures : []
+        return ValidationCaptureContext(
+            sessionID: session.id,
+            setNumber: setNumber,
+            lockedCameraPosition: session.lockedCameraPosition,
+            anchorScanID: session.anchorScanID,
+            initialCaptures: initial
+        )
+    }
+
+    func updateValidationDraft(
+        sessionID: UUID,
+        setNumber: Int,
+        captures: [PoseCapture]
+    ) throws {
+        refreshValidationSessionEligibility()
+        guard let index = validationSessions.firstIndex(where: { $0.id == sessionID }) else {
+            throw ValidationStudyError.sessionUnavailable
+        }
+        guard validationSessions[index].status == .active else {
+            let reason = validationSessions[index].statusReasons.last ?? .sessionExpired
+            throw ValidationStudyError.sessionIneligible(reason)
+        }
+        guard validationSessions[index].nextSetNumber == setNumber,
+              ValidationStudyPolicy.isValidDraft(
+                  captures,
+                  position: validationSessions[index].lockedCameraPosition,
+                  lockedLensType: validationSessions[index].lockedLensType
+              ) else {
+            throw ValidationStudyError.invalidCameraConfiguration
+        }
+        var candidate = validationSessions
+        candidate[index].draftSetNumber = setNumber
+        candidate[index].draftCaptures = captures
+        try ValidationStudyStore.save(candidate)
+        validationSessions = candidate
+    }
+
+    func discardValidationDraft(sessionID: UUID) {
+        guard let index = validationSessions.firstIndex(where: { $0.id == sessionID }) else { return }
+        let filenames = validationSessions[index].draftCaptures.map(\.imageFilename)
+        var candidate = validationSessions
+        candidate[index].draftSetNumber = nil
+        candidate[index].draftCaptures = []
+        guard (try? ValidationStudyStore.save(candidate)) != nil else { return }
+        validationSessions = candidate
+        PhotoStore.delete(named: filenames)
+    }
+
+    @discardableResult
+    func addValidationSet(
+        sessionID: UUID,
+        setNumber: Int,
+        captures: [PoseCapture],
+        now: Date = Date()
+    ) throws -> UUID {
+        refreshValidationSessionEligibility(now: now)
+        guard let sessionIndex = validationSessions.firstIndex(where: { $0.id == sessionID }) else {
+            throw ValidationStudyError.sessionUnavailable
+        }
+        var session = validationSessions[sessionIndex]
+        guard session.status == .active else {
+            let reason = session.statusReasons.last ?? .sessionExpired
+            throw ValidationStudyError.sessionIneligible(reason)
+        }
+        guard ValidationStudyPolicy.isValidCompletedSet(
+                  captures,
+                  position: session.lockedCameraPosition,
+                  lockedLensType: session.lockedLensType
+              ),
+              let configuration = ValidationStudyPolicy.cameraConfiguration(for: captures),
+              session.awaitingConditionsSetNumber == nil,
+              session.nextSetNumber == setNumber,
+              configuration.position == session.lockedCameraPosition,
+              session.lockedLensType == nil || session.lockedLensType == configuration.lensType else {
+            throw ValidationStudyError.invalidCameraConfiguration
+        }
+
+        let role: ScanRole
+        if setNumber == 1 {
+            role = canonicalScan(on: now) == nil ? .canonical : .validationAnchor
+        } else {
+            role = .validationRepeat
+        }
+        let isFirstCanonical = canonicalScans.isEmpty && role == .canonical
+        let scan = Scan(
+            date: now,
+            captures: captures,
+            consistencyScore: 0,
+            lightingScore: 0,
+            framingScore: 0,
+            note: nil,
+            context: nil,
+            analysisAvailability: role == .canonical
+                ? (isFirstCanonical ? .baselineOnly : .partialEvidence)
+                : .validationOnly,
+            captureCompleteness: .complete,
+            scanRole: role,
+            lastModifiedAt: now,
+            validationSessionID: sessionID,
+            validationSetNumber: setNumber
+        )
+
+        var candidateScans = scans
+        candidateScans.append(scan)
+        session.lockedLensType = configuration.lensType
+        session.draftSetNumber = nil
+        session.draftCaptures = []
+        session.sets.append(ValidationSetRecord(
+            setNumber: setNumber,
+            scanID: scan.id,
+            completedAt: now,
+            conditions: nil,
+            comparison: nil,
+            usedExistingCanonicalScan: false
+        ))
+        var candidateSessions = validationSessions
+        candidateSessions[sessionIndex] = session
+
+        try persist(scans: candidateScans)
+        do {
+            try ValidationStudyStore.save(candidateSessions)
+        } catch {
+            try? persist(scans: scans)
+            throw error
+        }
+        scans = candidateScans
+        validationSessions = candidateSessions
+        NotificationManager.sync(with: profile)
+        // Keep the five-set capture protocol free from competing background
+        // Vision work. If Set 1 is today's canonical scan, it is analyzed only
+        // after the local consistency evaluation has finished.
+        return scan.id
+    }
+
+    func recordValidationConditions(
+        sessionID: UUID,
+        setNumber: Int,
+        stayedTheSame: Bool,
+        deviations: [ValidationDeviationReason],
+        now: Date = Date()
+    ) throws {
+        refreshValidationSessionEligibility(now: now)
+        guard let sessionIndex = validationSessions.firstIndex(where: { $0.id == sessionID }) else {
+            throw ValidationStudyError.sessionUnavailable
+        }
+        guard validationSessions[sessionIndex].status == .active else {
+            let reason = validationSessions[sessionIndex].statusReasons.last ?? .sessionExpired
+            throw ValidationStudyError.sessionIneligible(reason)
+        }
+        guard
+              let setIndex = validationSessions[sessionIndex].sets.firstIndex(where: { $0.setNumber == setNumber }),
+              validationSessions[sessionIndex].sets[setIndex].conditions == nil,
+              stayedTheSame || !deviations.isEmpty else {
+            throw ValidationStudyError.conditionsRequired
+        }
+        var candidate = validationSessions
+        candidate[sessionIndex].sets[setIndex].conditions = ValidationSetConditions(
+            stayedTheSame: stayedTheSame,
+            deviations: stayedTheSame ? [] : deviations.filter(\.isUserSelectable),
+            recordedAt: now
+        )
+        if candidate[sessionIndex].isComplete {
+            candidate[sessionIndex].status = .evaluating
+        }
+        try ValidationStudyStore.save(candidate)
+        validationSessions = candidate
+    }
+
+    func evaluateValidationSession(sessionID: UUID, now: Date = Date()) async throws {
+        guard let index = validationSessions.firstIndex(where: { $0.id == sessionID }),
+              validationSessions[index].isComplete,
+              validationSessions[index].sets.allSatisfy({ $0.conditions != nil }) else {
+            throw PersistenceError.couldNotSave
+        }
+        var evaluating = validationSessions
+        evaluating[index].status = .evaluating
+        try ValidationStudyStore.save(evaluating)
+        validationSessions = evaluating
+
+        let snapshot = evaluating[index]
+        let evaluation = await ValidationConsistencyEngine.evaluate(
+            session: snapshot,
+            scans: scans,
+            now: now
+        )
+        guard let freshIndex = validationSessions.firstIndex(where: { $0.id == sessionID }) else {
+            throw PersistenceError.couldNotSave
+        }
+        var completed = validationSessions
+        for setIndex in completed[freshIndex].sets.indices {
+            let number = completed[freshIndex].sets[setIndex].setNumber
+            completed[freshIndex].sets[setIndex].comparison = evaluation.comparisonsBySet[number]
+        }
+        completed[freshIndex].result = evaluation.status
+        completed[freshIndex].algorithmMetadata = evaluation.metadata
+        completed[freshIndex].status = .completed
+        completed[freshIndex].completedAt = now
+        try ValidationStudyStore.save(completed)
+        validationSessions = completed
+        if let anchorID = completed[freshIndex].anchorScanID,
+           let anchor = scan(id: anchorID),
+           anchor.isCanonicalProgressScan,
+           AnalysisStore.needsReanalysis(scanId: anchorID) {
+            analyzeCanonicalScans(startingAt: anchor.date)
+        }
+    }
+
+    func refreshValidationSessionEligibility(now: Date = Date()) {
+        var candidate = validationSessions
+        var changed = false
+        for index in candidate.indices where candidate[index].status == .active {
+            if case .ineligible(let reason) = candidate[index].eligibility(at: now) {
+                candidate[index].status = .protocolIneligible
+                if !candidate[index].statusReasons.contains(reason) {
+                    candidate[index].statusReasons.append(reason)
+                }
+                candidate[index].result = .needsReview
+                changed = true
+            }
+        }
+        guard changed, (try? ValidationStudyStore.save(candidate)) != nil else { return }
+        validationSessions = candidate
+    }
+
+    @discardableResult
+    func startAnotherValidationSession(
+        cameraPosition: CaptureCameraPosition,
+        now: Date = Date()
+    ) throws -> UUID {
+        refreshValidationSessionEligibility(now: now)
+        if let active = activeValidationSession,
+           let index = validationSessions.firstIndex(where: { $0.id == active.id }) {
+            var candidate = validationSessions
+            candidate[index].status = .abandoned
+            try ValidationStudyStore.save(candidate)
+            validationSessions = candidate
+        }
+        return try startValidationSession(
+            cameraPosition: cameraPosition,
+            useEligibleCanonical: false,
+            now: now
+        )
+    }
+
+    private func invalidateValidationSession(
+        containing scanID: UUID,
+        reason: ValidationDeviationReason
+    ) {
+        guard let index = validationSessions.firstIndex(where: { session in
+            session.sets.contains { $0.scanID == scanID }
+        }) else { return }
+        var candidate = validationSessions
+        candidate[index].status = .protocolIneligible
+        candidate[index].result = .needsReview
+        if !candidate[index].statusReasons.contains(reason) {
+            candidate[index].statusReasons.append(reason)
+        }
+        guard (try? ValidationStudyStore.save(candidate)) != nil else { return }
+        validationSessions = candidate
+    }
+
+    private func deleteValidationDraftPhotos() {
+        PhotoStore.delete(named: validationSessions.flatMap { $0.draftCaptures.map(\.imageFilename) })
+    }
+
+    private func analyzeCanonicalScans(startingAt date: Date) {
+        let eligible = canonicalScans
+        let targets = eligible.filter { $0.date >= date }.sorted { $0.date < $1.date }
+        guard !targets.isEmpty else { return }
+        analysisPending = true
+        let allMeasurements = measurements
+        let userProfile = profile
+
+        Task {
+            var newestAnalysis: ScanAnalysis?
+            for target in targets {
+                let analysis = await AnalysisPipeline.shared.analyzeNewScan(
+                    scan: target,
+                    allScans: eligible,
+                    measurements: allMeasurements,
+                    profile: userProfile
+                )
+                newestAnalysis = analysis
+                await MainActor.run {
+                    if let index = self.scans.firstIndex(where: { $0.id == target.id }) {
+                        self.scans[index].analysisAvailability = analysis.analysisAvailability
+                        self.scans[index].lastModifiedAt = Date()
+                        self.save()
+                    }
+                }
+                await PilotSubmissionCoordinator.shared.submitAutomaticOngoingResultsIfEligible(
+                    scan: target,
+                    analysis: analysis
+                )
+            }
+            let finalNewestAnalysis = newestAnalysis
+            await MainActor.run {
+                if let latestID = self.latestScan?.id,
+                   let latest = targets.last(where: { $0.id == latestID }) {
+                    self.latestAnalysis = AnalysisStore.load(scanId: latest.id) ?? finalNewestAnalysis
+                } else if let latestID = self.latestScan?.id {
+                    self.latestAnalysis = AnalysisStore.load(scanId: latestID)
+                }
+                self.analysisPending = false
+            }
+        }
     }
 }

@@ -1,0 +1,9 @@
+{
+  "scheme": "Evolv",
+  "version": "1.0",
+  "build": 13,
+  "bundleIdentifier": "com.app.evolv",
+  "purpose": "TestFlight validation of analysis v4, person-aligned Vision extraction, truthful evidence fusion, deterministic fixtures, and physical-device validation",
+  "testFlightStatus": "uploaded; Apple processing",
+  "appStoreStatus": "not submitted"
+}

@@ -15,19 +15,20 @@ enum TrendSmoothingEngine {
         var regionSeries: [String: [Float]] = [:]
 
         for analysis in allAnalyses.sorted(by: { $0.analyzedAt < $1.analyzedAt }) {
-            for delta in analysis.visualSignals.deltas {
+            for delta in analysis.visualSignals.deltas where delta.region != .thighs {
                 let key = delta.region.rawValue
                 regionSeries[key, default: []].append(delta.normalizedDelta)
             }
         }
         // Append current values
-        for delta in currentVisualSignals.deltas {
+        let currentRegionKeys = Set(currentVisualSignals.deltas.map { $0.region.rawValue })
+        for delta in currentVisualSignals.deltas where delta.region != .thighs {
             let key = delta.region.rawValue
             regionSeries[key, default: []].append(delta.normalizedDelta)
         }
 
         var smoothedDeltas: [String: Float] = [:]
-        for (key, series) in regionSeries {
+        for (key, series) in regionSeries where currentRegionKeys.contains(key) {
             let cleaned = suppressOutliers(series)
             smoothedDeltas[key] = ewma(cleaned)
         }
@@ -47,8 +48,12 @@ enum TrendSmoothingEngine {
             propSeries.append(current)
         }
 
-        let smoothedTaper = ewma(suppressOutliers(taperSeries))
-        let smoothedProp  = ewma(suppressOutliers(propSeries))
+        let smoothedTaper = currentVisualSignals.fatLossSignals == nil
+            ? 0
+            : ewma(suppressOutliers(taperSeries))
+        let smoothedProp = currentVisualSignals.fatLossSignals == nil
+            ? 0
+            : ewma(suppressOutliers(propSeries))
         let scanCount     = allAnalyses.count + 1
 
         return SmoothedSignalSet(

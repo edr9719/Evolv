@@ -1,0 +1,9 @@
+{
+  "scheme": "Evolv",
+  "version": "1.0",
+  "build": 11,
+  "bundleIdentifier": "com.app.evolv",
+  "purpose": "TestFlight validation of reliable capture, targeted repair, truthful analysis, timeline gallery, and privacy controls",
+  "testFlightStatus": "uploaded; Apple processing",
+  "appStoreStatus": "not submitted"
+}

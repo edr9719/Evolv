@@ -10,6 +10,7 @@ struct TimelineView: View {
     @State private var showFullscreen = false
     @State private var showLeftPicker = false
     @State private var showRightPicker = false
+    @State private var detailRequest: ScanDetailRequest? = nil
 
     var body: some View {
         Group {
@@ -38,6 +39,9 @@ struct TimelineView: View {
                         sliderPos = 0.5
                     }
                 }
+                .sheet(item: $detailRequest) { request in
+                    NavigationStack { ScanDetailView(scanID: request.id) }
+                }
             }
         }
         .trackView("TimelineView")
@@ -47,7 +51,7 @@ struct TimelineView: View {
     private var content: some View {
         if app.scans.isEmpty {
             emptyState
-        } else if app.scans.count == 1 {
+        } else if app.canonicalScans.count <= 1 {
             singleScanState
         } else {
             scrollContent
@@ -68,6 +72,9 @@ struct TimelineView: View {
                     .padding(.horizontal, 20)
 
                 timelineList
+                    .padding(.horizontal, 24)
+
+                validationSessionSection
                     .padding(.horizontal, 24)
                     .padding(.bottom, 32)
             }
@@ -253,11 +260,42 @@ struct TimelineView: View {
     // MARK: - Timeline list
 
     private var timelineList: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            EvolvSectionHeader(title: "ALL SCANS", trailing: "\(app.scans.count) total")
+        let visibleScans = app.scans
+            .filter { !$0.isValidationOnlyScan }
+            .sorted { $0.date > $1.date }
+        return VStack(alignment: .leading, spacing: 12) {
+            EvolvSectionHeader(title: "ALL SCANS", trailing: "\(visibleScans.count) total")
             VStack(spacing: 10) {
-                ForEach(app.scans.sorted { $0.date > $1.date }) { scan in
-                    ScanRow(scan: scan)
+                ForEach(visibleScans) { scan in
+                    Button {
+                        detailRequest = ScanDetailRequest(id: scan.id)
+                    } label: {
+                        ScanRow(scan: scan)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var validationSessionSection: some View {
+        let sessions = app.validationSessions.sorted { $0.startedAt > $1.startedAt }
+        if !sessions.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                EvolvSectionHeader(title: "CONSISTENCY TESTS", trailing: "\(sessions.count)")
+                Text("Grouped separately. Consistency repeats never affect your baseline, progress, reminders, or streak.")
+                    .font(.system(size: 11.5, design: .rounded))
+                    .foregroundStyle(EvolvTheme.textFaint)
+                    .lineSpacing(2)
+                ForEach(sessions) { session in
+                    ValidationTimelineCard(
+                        session: session,
+                        scans: app.validationScans(sessionID: session.id),
+                        onOpenScan: { scanID in
+                            detailRequest = ScanDetailRequest(id: scanID)
+                        }
+                    )
                 }
             }
         }
@@ -291,47 +329,82 @@ struct TimelineView: View {
     }
 
     private var singleScanState: some View {
-        VStack(spacing: 18) {
-            Spacer()
-            if let scan = app.firstScan, let cap = scan.capture(for: .front) ?? scan.standardCaptures.first {
-                ZStack {
-                    if let img = PhotoStore.loadImage(named: cap.imageFilename) {
-                        Image(uiImage: img)
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: 240, height: 360)
-                            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        ScrollView {
+            VStack(spacing: 18) {
+                if let scan = app.firstScan, let cap = scan.capture(for: .front) ?? scan.standardCaptures.first {
+                    Button {
+                        detailRequest = ScanDetailRequest(id: scan.id)
+                    } label: {
+                        ZStack {
+                            if let img = PhotoStore.loadImage(named: cap.imageFilename) {
+                                Image(uiImage: img)
+                                    .resizable()
+                                    .scaledToFill()
+                                    .frame(width: 240, height: 360)
+                                    .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                            }
+                            LinearGradient(colors: [.clear, .black.opacity(0.5)], startPoint: .center, endPoint: .bottom)
+                                .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                                .frame(width: 240, height: 360)
+                            VStack {
+                                Spacer()
+                                Text("BASELINE")
+                                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                                    .tracking(1.4)
+                                    .foregroundStyle(EvolvTheme.accent)
+                                Text(scan.date, format: .dateTime.day().month(.wide).year())
+                                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                                    .foregroundStyle(.white)
+                            }
+                            .padding(.bottom, 16)
+                        }
+                        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(EvolvTheme.stroke, lineWidth: 1))
+                        .shadow(color: .black.opacity(0.3), radius: 24, y: 12)
                     }
-                    LinearGradient(colors: [.clear, .black.opacity(0.5)], startPoint: .center, endPoint: .bottom)
-                        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-                        .frame(width: 240, height: 360)
-                    VStack {
-                        Spacer()
-                        Text("BASELINE")
-                            .font(.system(size: 10, weight: .semibold, design: .rounded))
-                            .tracking(1.4)
-                            .foregroundStyle(EvolvTheme.accent)
-                        Text(scan.date, format: .dateTime.day().month(.wide).year())
-                            .font(.system(size: 13, weight: .medium, design: .rounded))
-                            .foregroundStyle(.white)
-                    }
-                    .padding(.bottom, 16)
+                    .buttonStyle(.plain)
                 }
-                .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(EvolvTheme.stroke, lineWidth: 1))
-                .shadow(color: .black.opacity(0.3), radius: 24, y: 12)
+
+                VStack(spacing: 8) {
+                    Text("Baseline captured.")
+                        .font(.system(size: 22, weight: .semibold, design: .rounded))
+                        .foregroundStyle(EvolvTheme.text)
+                    Text("Your next progress scan will unlock the before-and-after comparison.")
+                        .font(.system(size: 14, design: .rounded))
+                        .foregroundStyle(EvolvTheme.textMuted)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 40)
+                    Text("Tap the baseline to view all \(app.firstScan?.captures.count ?? 0) photos")
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .foregroundStyle(EvolvTheme.accent)
+                }
+
+                let extras = app.scans
+                    .filter { !$0.isCanonicalProgressScan && !$0.isValidationOnlyScan }
+                    .sorted { $0.date > $1.date }
+                if !extras.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        EvolvSectionHeader(title: "SAME-DAY EXTRAS", trailing: "\(extras.count)")
+                        ForEach(extras) { scan in
+                            Button {
+                                detailRequest = ScanDetailRequest(id: scan.id)
+                            } label: {
+                                ScanRow(scan: scan)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.top, 10)
+                }
+
+                validationSessionSection
+                    .padding(.horizontal, 20)
+                    .padding(.top, 10)
             }
-            VStack(spacing: 8) {
-                Text("Baseline captured.")
-                    .font(.system(size: 22, weight: .semibold, design: .rounded))
-                    .foregroundStyle(EvolvTheme.text)
-                Text("Your next scan will unlock the before-and-after comparison.")
-                    .font(.system(size: 14, design: .rounded))
-                    .foregroundStyle(EvolvTheme.textMuted)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 40)
-            }
-            Spacer()
+            .padding(.top, 32)
+            .padding(.bottom, 36)
         }
+        .scrollIndicators(.hidden)
     }
 
     // MARK: - Helpers
@@ -347,6 +420,121 @@ struct TimelineView: View {
         // Pick default pose available in both
         let poses = posesAvailableForBothScans()
         if !poses.contains(selectedPose), let first = poses.first { selectedPose = first }
+    }
+}
+
+// MARK: - Local consistency-test group
+
+private struct ValidationTimelineCard: View {
+    let session: ValidationStudySession
+    let scans: [Scan]
+    let onOpenScan: (UUID) -> Void
+
+    private var statusTitle: String {
+        switch session.status {
+        case .active: return "In progress"
+        case .evaluating: return "Evaluating locally"
+        case .completed: return session.result?.title ?? "Complete"
+        case .protocolIneligible: return "Protocol incomplete"
+        case .abandoned: return "Stopped"
+        }
+    }
+
+    private var statusIcon: String {
+        switch session.status {
+        case .active: return "camera.fill"
+        case .evaluating: return "hourglass"
+        case .completed:
+            switch session.result {
+            case .consistent: return "checkmark.seal.fill"
+            case .limitedEvidence: return "viewfinder.circle"
+            case .needsReview: return "exclamationmark.triangle.fill"
+            case .none: return "checkmark.circle"
+            }
+        case .protocolIneligible, .abandoned: return "clock.badge.exclamationmark"
+        }
+    }
+
+    var body: some View {
+        GlassCard(padding: 16, cornerRadius: 20) {
+            VStack(alignment: .leading, spacing: 13) {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: statusIcon)
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(EvolvTheme.accent)
+                        .frame(width: 28, height: 28)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(statusTitle)
+                            .font(.system(size: 14.5, weight: .semibold, design: .rounded))
+                            .foregroundStyle(EvolvTheme.text)
+                        Text(session.startedAt, format: .dateTime.weekday(.wide).day().month(.abbreviated).hour().minute())
+                            .font(.system(size: 11.5, design: .rounded))
+                            .foregroundStyle(EvolvTheme.textMuted)
+                    }
+                    Spacer()
+                    Text("\(session.completedSetCount)/5")
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .foregroundStyle(EvolvTheme.accent)
+                }
+
+                HStack(spacing: 8) {
+                    ForEach(1...ValidationStudySession.requiredSetCount, id: \.self) { setNumber in
+                        if let scan = scans.first(where: { $0.validationSetNumber == setNumber }) {
+                            Button {
+                                onOpenScan(scan.id)
+                            } label: {
+                                validationSetThumbnail(scan: scan, setNumber: setNumber)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Open consistency Set \(setNumber)")
+                        } else {
+                            validationSetPlaceholder(setNumber: setNumber)
+                        }
+                    }
+                }
+
+                Text("Uses the \(session.lockedCameraPosition.label.lowercased()) camera · saved only on this iPhone")
+                    .font(.system(size: 10.5, design: .rounded))
+                    .foregroundStyle(EvolvTheme.textFaint)
+            }
+        }
+    }
+
+    private func validationSetThumbnail(scan: Scan, setNumber: Int) -> some View {
+        ZStack(alignment: .bottom) {
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(EvolvTheme.surfaceHi)
+            if let capture = scan.capture(for: .front),
+               let image = PhotoStore.loadImage(named: capture.imageFilename) {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            }
+            LinearGradient(colors: [.clear, .black.opacity(0.65)], startPoint: .center, endPoint: .bottom)
+            Text("SET \(setNumber)")
+                .font(.system(size: 8, weight: .bold, design: .rounded))
+                .tracking(0.5)
+                .foregroundStyle(.white)
+                .padding(.bottom, 6)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 82)
+        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 11).stroke(EvolvTheme.stroke, lineWidth: 1))
+    }
+
+    private func validationSetPlaceholder(setNumber: Int) -> some View {
+        VStack(spacing: 5) {
+            Image(systemName: "circle.dashed")
+                .font(.system(size: 15))
+            Text("SET \(setNumber)")
+                .font(.system(size: 7.5, weight: .semibold, design: .rounded))
+        }
+        .foregroundStyle(EvolvTheme.textFaint)
+        .frame(maxWidth: .infinity)
+        .frame(height: 82)
+        .background(RoundedRectangle(cornerRadius: 11).fill(EvolvTheme.surfaceHi))
+        .overlay(RoundedRectangle(cornerRadius: 11).stroke(EvolvTheme.stroke, lineWidth: 1))
     }
 }
 
@@ -544,7 +732,7 @@ struct ScanPickerSheet: View {
                 AmbientBackground()
                 ScrollView {
                     LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
-                        ForEach(app.scans.sorted { $0.date > $1.date }) { scan in
+                        ForEach(app.canonicalScans.sorted { $0.date > $1.date }) { scan in
                             if scan.id != excluding {
                                 Button {
                                     onPick(scan.id)
@@ -640,7 +828,12 @@ struct ScanRow: View {
                 }
             }
             Spacer()
-            ConfidenceChip(confidence: scan.consistencyScore > 78 ? .high : (scan.consistencyScore > 55 ? .medium : .low))
+            Text(scan.analysisAvailability?.label ?? "Legacy")
+                .font(.system(size: 11, weight: .medium, design: .rounded))
+                .foregroundStyle(scan.analysisAvailability == .comparable ? EvolvTheme.accent : EvolvTheme.textMuted)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(Capsule().stroke(EvolvTheme.stroke, lineWidth: 1))
         }
         .padding(12)
         .background {

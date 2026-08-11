@@ -3,7 +3,9 @@ import SwiftUI
 struct HomeView: View {
     @Environment(AppState.self) private var app
     @State private var showPaywall = false
-    @State private var showCapture = false
+    @State private var captureRequest: CaptureRequest? = nil
+    @State private var showStartOptions = false
+    @State private var detailRequest: ScanDetailRequest? = nil
     @State private var showStats = false
     @State private var showLogMeasurement = false
     @State private var showSettings = false
@@ -86,7 +88,27 @@ struct HomeView: View {
                         .presentationDetents([.medium, .large])
                         .presentationDragIndicator(.visible)
                 }
-                .fullScreenCover(isPresented: $showCapture) { CaptureFlowView() }
+                .fullScreenCover(item: $captureRequest) { request in
+                    CaptureFlowView(
+                        scanRole: request.role,
+                        repairScanID: request.repairScanID,
+                        repairPoses: request.poses
+                    )
+                }
+                .sheet(isPresented: $showStartOptions) {
+                    if let today = app.todayCanonicalScan {
+                        ScanStartOptionsSheet(
+                            scanID: today.id,
+                            onCapture: { captureRequest = $0 },
+                            onView: { detailRequest = ScanDetailRequest(id: $0) }
+                        )
+                        .presentationDetents([.large])
+                        .presentationDragIndicator(.visible)
+                    }
+                }
+                .sheet(item: $detailRequest) { request in
+                    NavigationStack { ScanDetailView(scanID: request.id) }
+                }
             }
         }
         .trackView("HomeView")
@@ -116,7 +138,6 @@ struct HomeView: View {
 
     private var insightHero: some View {
         let s = app.weeklySummary
-        let p = app.progressScore
         return GlassCard(padding: 26, cornerRadius: 30) {
             VStack(alignment: .leading, spacing: 20) {
                 HStack(spacing: 8) {
@@ -128,9 +149,6 @@ struct HomeView: View {
                         .tracking(1.6)
                         .foregroundStyle(EvolvTheme.textFaint)
                     Spacer()
-                    if app.hasAnyScans {
-                        trendIndicator(p.weeklyDelta)
-                    }
                 }
 
                 Text(s.headline)
@@ -148,8 +166,14 @@ struct HomeView: View {
                 }
 
                 HStack {
-                    if app.hasAnyScans {
+                    if app.latestAnalysis?.confidence.hasSufficientEvidence == true {
                         ConfidenceChip(confidence: s.confidence)
+                    }
+                    if let source = app.latestAnalysis?.generatedInsight?.source,
+                       app.latestAnalysis?.analysisAvailability == .comparable {
+                        Text(source.label)
+                            .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                            .foregroundStyle(EvolvTheme.textFaint)
                     }
                     Spacer()
                     if let last = app.latestScan {
@@ -182,13 +206,10 @@ struct HomeView: View {
     // MARK: - Small summary row
 
     private var summaryRow: some View {
-        let p = app.progressScore
-        let avgC = app.scans.isEmpty ? 0 : app.scans.map(\.consistencyScore).reduce(0, +) / app.scans.count
-        let consistencyLabel = avgC > 78 ? "High" : avgC > 55 ? "Steady" : "Low"
         return HStack(spacing: 10) {
-            summaryCell(title: "Consistency", value: consistencyLabel)
-            summaryCell(title: "Momentum", value: p.momentum)
-            summaryCell(title: "Score", value: p.value > 0 ? "\(p.value)" : "—")
+            summaryCell(title: "Evidence", value: app.latestScan?.analysisAvailability?.label ?? "Legacy")
+            summaryCell(title: "Progress scans", value: "\(app.canonicalScans.count)")
+            summaryCell(title: "Measurements", value: "\(app.measurements.count)")
         }
     }
 
@@ -253,22 +274,25 @@ struct HomeView: View {
         }
     }
 
-    // MARK: - Confidence card
+    // MARK: - Evidence card
 
     private var confidenceCard: some View {
-        let avgL = app.scans.isEmpty ? 0 : app.scans.map(\.lightingScore).reduce(0, +) / app.scans.count
-        let latestC = app.latestScan?.consistencyScore ?? 0
         let (text, icon, color): (String, String, Color) = {
             if !app.hasAnyScans {
                 return ("No scans yet — your first capture sets the baseline.", "camera", EvolvTheme.textMuted)
             }
-            if avgL < 60 {
-                return ("Lighting inconsistencies reduced confidence slightly.", "lightbulb", EvolvTheme.stable)
+            if app.analysisPending {
+                return ("Analyzing only the regions supported by this scan.", "hourglass", EvolvTheme.textMuted)
             }
-            if latestC > 78 {
-                return ("Latest scan confidence: High", "checkmark.seal.fill", EvolvTheme.improving)
+            if app.latestAnalysis?.analysisAvailability == .comparable,
+               let confidence = app.latestAnalysis?.confidence,
+               confidence.hasSufficientEvidence == true {
+                return ("Latest analysis evidence: \(confidence.overall.label.lowercased())", "checkmark.seal.fill", EvolvTheme.improving)
             }
-            return ("Latest scan confidence: Steady", "circle.lefthalf.filled", EvolvTheme.textMuted)
+            if app.canonicalScans.count == 1 {
+                return ("Baseline saved. A second comparable scan is required before progress can be assessed.", "viewfinder.circle", EvolvTheme.textMuted)
+            }
+            return ("Evidence is limited. Unsupported body regions were excluded instead of estimated.", "eye.slash", EvolvTheme.stable)
         }()
 
         return HStack(spacing: 14) {
@@ -299,10 +323,10 @@ struct HomeView: View {
     private var actionRow: some View {
         VStack(spacing: 10) {
             EvolvPrimaryButton(
-                title: app.hasAnyScans ? "New scan" : "Capture baseline",
+                title: captureButtonTitle,
                 icon: "camera.fill"
             ) {
-                showCapture = true
+                beginCaptureDecision()
             }
             if app.hasAnyScans && app.measurements.count < 2 {
                 Button { showLogMeasurement = true } label: {
@@ -312,6 +336,21 @@ struct HomeView: View {
                 }
                 .buttonStyle(.plain)
             }
+        }
+    }
+
+    private var captureButtonTitle: String {
+        guard let today = app.todayCanonicalScan else {
+            return app.hasAnyScans ? "New scan" : "Capture baseline"
+        }
+        return today.recommendedRepairPoses.isEmpty ? "Today's scan options" : "Improve today's scan"
+    }
+
+    private func beginCaptureDecision() {
+        if app.todayCanonicalScan == nil {
+            captureRequest = .newCanonical
+        } else {
+            showStartOptions = true
         }
     }
 

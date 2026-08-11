@@ -1,0 +1,10 @@
+project_id = "evolv"
+
+[functions.pilot-api]
+verify_jwt = false
+
+[functions.pilot-admin]
+verify_jwt = false
+
+[functions.pilot-retention]
+verify_jwt = false

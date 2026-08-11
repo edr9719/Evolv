@@ -1,0 +1,9 @@
+{
+  "scheme": "Evolv",
+  "version": "1.0",
+  "build": 14,
+  "bundleIdentifier": "com.app.evolv",
+  "purpose": "TestFlight validation of persistent front/rear camera controls, correct front-camera mirroring, camera comparability metadata, and the new Evolv app icon",
+  "testFlightStatus": "uploaded; superseded by build 15 before tester release",
+  "appStoreStatus": "not submitted"
+}

@@ -1,0 +1,32 @@
+{
+  "configurations" : [
+    {
+      "id" : "8CE1B624-5CE4-4A81-BD7D-B2662168EE01",
+      "name" : "Physical iPhone",
+      "options" : {
+        "environmentVariableEntries" : [
+          {"key":"EVOLV_ALLOW_NETWORK","value":"0","isEnabled":true},
+          {"key":"EVOLV_VISION_DEVICE_TESTS","value":"1","isEnabled":true}
+        ]
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "codeCoverage" : false,
+    "targetForVariableExpansion" : {
+      "containerPath" : "container:Evolv.xcodeproj",
+      "identifier" : "874C11CF293C65A9E23D8D12",
+      "name" : "Evolv"
+    }
+  },
+  "testTargets" : [
+    {
+      "target" : {
+        "containerPath" : "container:Evolv.xcodeproj",
+        "identifier" : "F960154B0939BA5BC245A8E1",
+        "name" : "EvolvTests"
+      }
+    }
+  ],
+  "version" : 1
+}

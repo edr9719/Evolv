@@ -1,0 +1,358 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "base64"
+require "csv"
+require "digest"
+require "erb"
+require "fileutils"
+require "json"
+require "net/http"
+require "openssl"
+require "optparse"
+require "securerandom"
+require "time"
+require "uri"
+
+ROOT = File.expand_path("..", __dir__)
+PRIVATE_ROOT = File.join(ROOT, "private", "pilot")
+DEFAULT_URL = "https://zaqbnznrfvapbgrjxskv.supabase.co/functions/v1/pilot-admin"
+PRIVATE_KEY_PATH = File.join(PRIVATE_ROOT, "evolv-pilot-private.pem")
+BACKEND_SECRET_PATH = File.join(PRIVATE_ROOT, "backend.env")
+
+def usage!
+  abort <<~TEXT
+    Usage:
+      scripts/evolv-pilot keygen
+      scripts/evolv-pilot secrets
+      scripts/evolv-pilot create-study [--name NAME] [--days 90] [--capacity 5]
+      scripts/evolv-pilot invites STUDY_ID [--count 5]
+      scripts/evolv-pilot status STUDY_ID
+      scripts/evolv-pilot download STUDY_ID [--include-photos] [--output DIR]
+      scripts/evolv-pilot report DOWNLOAD_JSON [--output DIR]
+      scripts/evolv-pilot stage DOWNLOAD_DIR
+      scripts/evolv-pilot delete PARTICIPANT_ID
+      scripts/evolv-pilot close STUDY_ID
+      scripts/evolv-pilot retention
+
+    Network commands require EVOLV_PILOT_ADMIN_SECRET. EVOLV_PILOT_ADMIN_URL
+    may override the backend URL. Photos are never downloaded unless the exact
+    --include-photos flag is present.
+  TEXT
+end
+
+def admin_request(path, body)
+  secret = ENV.fetch("EVOLV_PILOT_ADMIN_SECRET", "")
+  abort "EVOLV_PILOT_ADMIN_SECRET is required" if secret.length < 32
+  base = ENV.fetch("EVOLV_PILOT_ADMIN_URL", DEFAULT_URL)
+  uri = URI("#{base.sub(%r{/$}, "")}/#{path}")
+  request = Net::HTTP::Post.new(uri)
+  request["authorization"] = "Bearer #{secret}"
+  request["content-type"] = "application/json"
+  request.body = JSON.generate(body)
+  response = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == "https", open_timeout: 15, read_timeout: 120) do |http|
+    http.request(request)
+  end
+  parsed = JSON.parse(response.body)
+  abort "Pilot API #{response.code}: #{parsed["code"] || "request_failed"}" unless response.is_a?(Net::HTTPSuccess)
+  parsed
+end
+
+def write_private(path, content)
+  FileUtils.mkdir_p(File.dirname(path), mode: 0o700)
+  File.write(path, content, mode: "wb")
+  File.chmod(0o600, path)
+end
+
+def keygen
+  abort "Private key already exists at #{PRIVATE_KEY_PATH}" if File.exist?(PRIVATE_KEY_PATH)
+  key = OpenSSL::PKey::EC.generate("prime256v1")
+  write_private(PRIVATE_KEY_PATH, key.to_pem)
+  public_bytes = key.public_key.to_octet_string(:uncompressed)
+  public_text = Base64.strict_encode64(public_bytes)
+  write_private(File.join(PRIVATE_ROOT, "public-key.txt"), public_text + "\n")
+  puts "Created pilot keypair."
+  puts "Private key: #{PRIVATE_KEY_PATH} (git-ignored; back it up securely)"
+  puts "Public X9.63 key: #{public_text}"
+end
+
+def generate_backend_secrets
+  abort "Pilot backend secrets already exist at #{BACKEND_SECRET_PATH}" if File.exist?(BACKEND_SECRET_PATH)
+  values = {
+    "PILOT_INVITE_PEPPER" => SecureRandom.urlsafe_base64(48),
+    "PILOT_ADMIN_SECRET" => SecureRandom.urlsafe_base64(48),
+    "PILOT_CRON_SECRET" => SecureRandom.urlsafe_base64(48)
+  }
+  body = values.map { |name, value| "#{name}=#{value}" }.join("\n") + "\n"
+  write_private(BACKEND_SECRET_PATH, body)
+  puts "Created pilot backend secrets at #{BACKEND_SECRET_PATH}."
+  puts "The file is owner-readable, Git-ignored, and its values were not printed."
+end
+
+def download_file(url, destination)
+  uri = URI(url)
+  response = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == "https", open_timeout: 15, read_timeout: 120) do |http|
+    http.request(Net::HTTP::Get.new(uri))
+  end
+  abort "Encrypted photo download failed: HTTP #{response.code}" unless response.is_a?(Net::HTTPSuccess)
+  write_private(destination, response.body)
+end
+
+def ec_public_key(x963)
+  algorithm = OpenSSL::ASN1::Sequence([
+    OpenSSL::ASN1::ObjectId("id-ecPublicKey"),
+    OpenSSL::ASN1::ObjectId("prime256v1")
+  ])
+  spki = OpenSSL::ASN1::Sequence([algorithm, OpenSSL::ASN1::BitString(x963)])
+  OpenSSL::PKey.read(spki.to_der)
+end
+
+def aes_gcm_decrypt(combined, key)
+  abort "Invalid AES-GCM envelope" if combined.bytesize < 29
+  nonce = combined.byteslice(0, 12)
+  tag = combined.byteslice(-16, 16)
+  ciphertext = combined.byteslice(12, combined.bytesize - 28)
+  cipher = OpenSSL::Cipher.new("aes-256-gcm")
+  cipher.decrypt
+  cipher.key = key
+  cipher.iv = nonce
+  cipher.auth_tag = tag
+  cipher.auth_data = ""
+  cipher.update(ciphertext) + cipher.final
+end
+
+def unwrap_submission_key(envelope, private_key)
+  abort "Unsupported photo envelope" unless envelope["algorithm"] == "P256-HKDF-SHA256+A256GCM"
+  ephemeral = ec_public_key(Base64.strict_decode64(envelope.fetch("ephemeral_public_key_base64")))
+  shared = private_key.derive(ephemeral)
+  wrapping = OpenSSL::KDF.hkdf(
+    shared,
+    salt: Base64.strict_decode64(envelope.fetch("salt_base64")),
+    info: "evolv-pilot-wrap-v1",
+    length: 32,
+    hash: "SHA256"
+  )
+  aes_gcm_decrypt(Base64.strict_decode64(envelope.fetch("sealed_key_base64")), wrapping)
+end
+
+def process_download(payload, output_dir, include_photos)
+  FileUtils.mkdir_p(output_dir, mode: 0o700)
+  json_path = File.join(output_dir, "pilot-results.json")
+  write_private(json_path, JSON.pretty_generate(payload) + "\n")
+  return json_path unless include_photos
+
+  abort "Pilot private key not found at #{PRIVATE_KEY_PATH}" unless File.file?(PRIVATE_KEY_PATH)
+  private_key = OpenSSL::PKey.read(File.read(PRIVATE_KEY_PATH))
+  payload.fetch("submissions", []).each do |session|
+    submission = Array(session["pilot_submissions"]).first || session["pilot_submissions"] || {}
+    photos = session.fetch("encrypted_photos", [])
+    next if photos.empty?
+    content_key = unwrap_submission_key(submission.fetch("wrapped_key"), private_key)
+    participant = session.fetch("participant_id").to_s
+    local_session = session.fetch("local_session_id").to_s
+    target = File.join(output_dir, "photos", participant, local_session)
+    FileUtils.mkdir_p(target, mode: 0o700)
+    photos.each do |photo|
+      object_id = photo.fetch("id")
+      encrypted_path = File.join(target, "#{object_id}.bin")
+      download_file(photo.fetch("signed_url"), encrypted_path)
+      ciphertext = File.binread(encrypted_path)
+      actual = Digest::SHA256.hexdigest(ciphertext)
+      abort "Hash mismatch for #{object_id}" unless actual == photo.fetch("ciphertext_sha256")
+      plaintext = aes_gcm_decrypt(ciphertext, content_key)
+      filename = format("set-%02d-%s.jpg", photo.fetch("set_number"), photo.fetch("pose"))
+      write_private(File.join(target, filename), plaintext)
+    end
+  end
+  json_path
+end
+
+def build_report(json_path, output_dir)
+  payload = JSON.parse(File.read(json_path))
+  sessions = payload.fetch("submissions", [])
+  FileUtils.mkdir_p(output_dir)
+  csv_path = File.join(output_dir, "pilot-regions.csv")
+  CSV.open(csv_path, "wb") do |csv|
+    csv << %w[participant_id local_session_id contribution_type set region status delta unavailable_reason device os camera]
+    sessions.each do |session|
+      results = session.fetch("results_payload", {})
+      contribution_type = session["contribution_type"] || results["contribution_type"] || "consistency_test"
+      sets = if contribution_type == "progress_scan"
+        [{ "set_number" => 1, "regions" => results.fetch("regions", []) }]
+      else
+        results.fetch("sets", [])
+      end
+      sets.each do |set|
+        set.fetch("regions", []).each do |region|
+          csv << [
+            session["participant_id"], session["local_session_id"], contribution_type, set["set_number"],
+            region["region"], region["status"], region["fused_delta"],
+            region["unavailable_reason_code"], session["device_model"],
+            session["operating_system_version"], session["camera_position"]
+          ]
+        end
+      end
+    end
+  end
+  statuses = sessions.group_by { |session| session["result_status"] }.transform_values(&:length)
+  contribution_types = sessions.group_by { |session| session["contribution_type"] || "consistency_test" }.transform_values(&:length)
+  devices = sessions.group_by { |session| [session["device_model"], session["operating_system_version"], session["camera_position"]].join(" · ") }.transform_values(&:length)
+  failures = sessions.sum do |session|
+    results = session.fetch("results_payload", {})
+    next results.fetch("failure_reason_codes_by_pose", {}).length if (session["contribution_type"] || results["contribution_type"]) == "progress_scan"
+    results.fetch("sets", []).sum { |set| set.fetch("failure_reason_codes_by_pose", {}).length }
+  end
+  unavailable = sessions.sum do |session|
+    results = session.fetch("results_payload", {})
+    regions = if (session["contribution_type"] || results["contribution_type"]) == "progress_scan"
+      results.fetch("regions", [])
+    else
+      results.fetch("sets", []).flat_map { |set| set.fetch("regions", []) }
+    end
+    regions.count { |region| region["status"] == "unavailable" }
+  end
+  changed = sessions.sum do |session|
+    results = session.fetch("results_payload", {})
+    regions = if (session["contribution_type"] || results["contribution_type"]) == "progress_scan"
+      results.fetch("regions", [])
+    else
+      results.fetch("sets", []).flat_map { |set| set.fetch("regions", []) }
+    end
+    regions.count { |region| %w[increase decrease].include?(region["status"]) }
+  end
+  escape = ->(value) { ERB::Util.html_escape(value.to_s) }
+  rows = statuses.sort.map { |key, count| "<tr><td>#{escape.call(key)}</td><td>#{count}</td></tr>" }.join
+  contribution_rows = contribution_types.sort.map { |key, count| "<tr><td>#{escape.call(key)}</td><td>#{count}</td></tr>" }.join
+  device_rows = devices.sort.map { |key, count| "<tr><td>#{escape.call(key)}</td><td>#{count}</td></tr>" }.join
+  html = <<~HTML
+    <!doctype html><html><head><meta charset="utf-8"><title>Evolv pilot report</title>
+    <style>body{font:16px system-ui;max-width:920px;margin:40px auto;padding:0 20px;color:#15231d}table{border-collapse:collapse;width:100%;margin:12px 0 28px}th,td{text-align:left;border-bottom:1px solid #ccd7d1;padding:9px}.cards{display:flex;gap:12px;flex-wrap:wrap}.card{border:1px solid #ccd7d1;border-radius:12px;padding:16px;min-width:150px}small{color:#607068}</style></head>
+    <body><h1>Evolv validation pilot</h1><small>Generated #{escape.call(Time.now.utc.iso8601)} · local artifact</small>
+    <div class="cards"><div class="card"><b>#{sessions.length}</b><br>submissions</div><div class="card"><b>#{changed}</b><br>unexpected changes</div><div class="card"><b>#{unavailable}</b><br>abstentions</div><div class="card"><b>#{failures}</b><br>processing failures</div></div>
+    <h2>Completion status</h2><table><tr><th>Status</th><th>Count</th></tr>#{rows}</table>
+    <h2>Contribution type</h2><table><tr><th>Type</th><th>Count</th></tr>#{contribution_rows}</table>
+    <h2>Device and capture coverage</h2><table><tr><th>Configuration</th><th>Count</th></tr>#{device_rows}</table>
+    <p>See <code>pilot-regions.csv</code> for pose/region evidence, deltas, deviations, and unavailable reasons. This report contains no photos.</p></body></html>
+  HTML
+  File.write(File.join(output_dir, "pilot-report.html"), html)
+  puts "Report: #{File.join(output_dir, "pilot-report.html")}"
+  puts "CSV: #{csv_path}"
+end
+
+command = ARGV.shift || usage!
+case command
+when "keygen"
+  keygen
+when "secrets"
+  generate_backend_secrets
+when "create-study"
+  options = { name: "Evolv five-person consistency pilot", days: 90, capacity: 5 }
+  OptionParser.new do |p|
+    p.on("--name NAME") { |v| options[:name] = v }
+    p.on("--days N", Integer) { |v| options[:days] = v }
+    p.on("--capacity N", Integer) { |v| options[:capacity] = v }
+  end.parse!(ARGV)
+  puts JSON.pretty_generate(admin_request("studies/create", {
+    name: options[:name], duration_days: options[:days], max_participants: options[:capacity]
+  }))
+when "invites"
+  study_id = ARGV.shift || usage!
+  count = 5
+  OptionParser.new { |p| p.on("--count N", Integer) { |v| count = v } }.parse!(ARGV)
+  response = admin_request("invites/create", { study_id: study_id, count: count })
+  path = File.join(PRIVATE_ROOT, "invites-#{study_id}.txt")
+  write_private(path, response.fetch("invites").join("\n") + "\n")
+  puts "Created #{response.fetch("invites").length} one-use invites: #{path}"
+when "status"
+  puts JSON.pretty_generate(admin_request("status", { study_id: ARGV.shift || usage! }))
+when "download"
+  study_id = ARGV.shift || usage!
+  options = { include_photos: false, output: File.join(PRIVATE_ROOT, "downloads", Time.now.utc.strftime("%Y%m%dT%H%M%SZ")) }
+  OptionParser.new { |p| p.on("--include-photos") { options[:include_photos] = true }; p.on("--output DIR") { |v| options[:output] = File.expand_path(v) } }.parse!(ARGV)
+  payload = admin_request("export", { study_id: study_id, include_photos: options[:include_photos] })
+  puts "Saved: #{process_download(payload, options[:output], options[:include_photos])}"
+when "report"
+  input = ARGV.shift || usage!
+  output = File.join(File.dirname(File.expand_path(input)), "report")
+  OptionParser.new { |p| p.on("--output DIR") { |v| output = File.expand_path(v) } }.parse!(ARGV)
+  build_report(File.expand_path(input), output)
+when "stage"
+  source = File.expand_path(ARGV.shift || usage!)
+  target = File.join(ROOT, "ios", "EvolvTests", "Fixtures", "Private", "pilot-#{Time.now.utc.strftime("%Y%m%dT%H%M%SZ")}")
+  results_path = File.join(source, "pilot-results.json")
+  abort "Missing pilot-results.json under #{source}" unless File.file?(results_path)
+  export = JSON.parse(File.read(results_path))
+  sessions = export.fetch("submissions", [])
+  photos = Dir.glob(File.join(source, "photos", "**", "*.jpg"))
+  abort "No decrypted photos found under #{source}" if photos.empty?
+  FileUtils.mkdir_p(target, mode: 0o700)
+  manifest = []
+  photos.each do |photo|
+    relative = photo.delete_prefix(File.join(source, "photos") + "/")
+    participant_id, local_session_id, filename = relative.split("/", 3)
+    match = filename&.match(/\Aset-(\d+)-([a-z]+)\.jpg\z/)
+    abort "Unexpected staged photo path: #{relative}" unless participant_id && local_session_id && match
+    session = sessions.find do |candidate|
+      candidate["participant_id"].to_s == participant_id && candidate["local_session_id"].to_s == local_session_id
+    end
+    abort "No exported session metadata for #{relative}" unless session
+    set_number = Integer(match[1], 10)
+    pose = match[2]
+    results = session.fetch("results_payload", {})
+    contribution_type = session["contribution_type"] || results["contribution_type"] || "consistency_test"
+    set_result = if contribution_type == "progress_scan"
+      results
+    else
+      results.fetch("sets", []).find { |candidate| candidate["set_number"].to_i == set_number } || {}
+    end
+    consent = session["pilot_consents"]
+    consent = consent.first if consent.is_a?(Array)
+    consent ||= {}
+    destination = File.join(target, relative)
+    FileUtils.mkdir_p(File.dirname(destination), mode: 0o700)
+    FileUtils.cp(photo, destination)
+    manifest << {
+      relative_path: relative,
+      pseudonymous_subject: "subject-#{Digest::SHA256.hexdigest(participant_id)[0, 12]}",
+      source_session_id: local_session_id,
+      contribution_type: contribution_type,
+      scan_date: set_result["completed_at"] || session["completed_at"],
+      set_number: set_number,
+      pose: pose,
+      consent_classification: "pilot_selected_photo",
+      consent: {
+        version: consent["version"],
+        share_scope: consent["share_scope"],
+        accepted_at: consent["accepted_at"]
+      },
+      expected_condition: contribution_type == "progress_scan" ? "longitudinal_observation_unlabeled" : "same_session_repeatability_stable",
+      transformation: "none",
+      device: {
+        model: session["device_model"],
+        operating_system: session["operating_system_version"],
+        camera_position: session["camera_position"],
+        lens_type: session["lens_type"]
+      },
+      environment: {
+        protocol: contribution_type == "progress_scan" ? "normal_canonical_progress_scan" : "tester_standardized_same_session",
+        conditions_stayed_the_same: set_result["conditions_stayed_the_same"],
+        deviation_reason_codes: set_result.fetch("deviation_reason_codes", [])
+      },
+      staged_at: Time.now.utc.iso8601
+    }
+  end
+  write_private(File.join(target, "manifest.json"), JSON.pretty_generate({
+    schema_version: 1,
+    source_study_id: export["study_id"],
+    fixtures: manifest
+  }) + "\n")
+  puts "Staged #{photos.length} private fixtures at #{target} (git-ignored)."
+when "delete"
+  puts JSON.pretty_generate(admin_request("participants/delete", { participant_id: ARGV.shift || usage! }))
+when "close"
+  puts JSON.pretty_generate(admin_request("studies/close", { study_id: ARGV.shift || usage! }))
+when "retention"
+  puts JSON.pretty_generate(admin_request("retention/run", {}))
+else
+  usage!
+end

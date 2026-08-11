@@ -1,6 +1,6 @@
 import SwiftUI
 
-// MARK: - Status / Confidence chips
+// MARK: - Status / Evidence chips
 
 struct StatusChip: View {
     let status: TrendStatus
@@ -27,7 +27,7 @@ struct ConfidenceChip: View {
         HStack(spacing: 5) {
             Image(systemName: icon)
                 .font(.system(size: 10, weight: .semibold))
-            Text("\(confidence.label) confidence")
+            Text("Evidence: \(confidence.label.lowercased())")
                 .font(.system(size: 11, weight: .medium, design: .rounded))
         }
         .foregroundStyle(EvolvTheme.textMuted)

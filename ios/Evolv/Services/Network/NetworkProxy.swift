@@ -2,7 +2,11 @@ import Foundation
 
 /// Sends InterpretedSignals to the Supabase Edge Function proxy and parses GeneratedInsight.
 /// Photos and raw measurements are NEVER sent — only the interpreted signal summary.
-final class NetworkProxy {
+protocol InsightRequesting {
+    func requestInsight(signals: InterpretedSignals) async -> GeneratedInsight?
+}
+
+final class NetworkProxy: InsightRequesting {
 
     static let shared = NetworkProxy()
     private init() {}
@@ -17,6 +21,9 @@ final class NetworkProxy {
     // MARK: - Public API
 
     func requestInsight(signals: InterpretedSignals) async -> GeneratedInsight? {
+        guard ProcessInfo.processInfo.environment["EVOLV_ALLOW_NETWORK"] != "0" else {
+            return nil
+        }
         guard let url = endpointURL else { return nil }
 
         var request = URLRequest(url: url)
@@ -28,12 +35,7 @@ final class NetworkProxy {
             request.setValue(anonKey, forHTTPHeaderField: "apikey")
         }
 
-        let payload = RequestPayload(
-            userId: anonymousUserId,
-            signals: signals
-        )
-
-        guard let body = try? JSONEncoder().encode(payload) else { return nil }
+        guard let body = try? Self.encodedRequestBody(signals: signals) else { return nil }
         request.httpBody = body
 
         do {
@@ -61,18 +63,15 @@ final class NetworkProxy {
         Bundle.main.object(forInfoDictionaryKey: "SUPABASE_ANON_KEY") as? String
     }
 
-    private var anonymousUserId: String {
-        let key = "evolv_anon_user_id"
-        if let existing = UserDefaults.standard.string(forKey: key) { return existing }
-        let newId = UUID().uuidString
-        UserDefaults.standard.set(newId, forKey: key)
-        return newId
-    }
-
     // MARK: - Request Payload
 
     private struct RequestPayload: Encodable {
-        let userId: String
         let signals: InterpretedSignals
+    }
+
+    /// Internal so the privacy boundary can be regression-tested without
+    /// making a network request.
+    static func encodedRequestBody(signals: InterpretedSignals) throws -> Data {
+        try JSONEncoder().encode(RequestPayload(signals: signals))
     }
 }

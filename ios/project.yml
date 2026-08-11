@@ -18,8 +18,10 @@ targets:
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
         INFOPLIST_KEY_UIRequiresFullScreen: YES
+        INFOPLIST_KEY_SUPABASE_URL: 'https://zaqbnznrfvapbgrjxskv.supabase.co'
+        INFOPLIST_KEY_SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_ZA6Ra_Sfi20g26DKGNeWXw_V0Qco0UW'
         MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: 9
+        CURRENT_PROJECT_VERSION: 16
         DEVELOPMENT_TEAM: 359J9B4674
         CODE_SIGN_STYLE: Automatic
         SWIFT_EMIT_LOC_STRINGS: NO
@@ -31,8 +33,35 @@ targets:
         Debug:
           ONLY_ACTIVE_ARCH: YES
     scheme:
+      testTargets:
+        - EvolvTests
+      testPlans:
+        - path: Evolv-Unit.xctestplan
+          defaultPlan: true
+        - path: Evolv-Vision-Device.xctestplan
       environmentVariables:
         'SUPABASE_ANON_KEY': 'sb_publishable_ZA6Ra_Sfi20g26DKGNeWXw_V0Qco0UW'
         'SUPABASE_PUBLISHABLE_KEY': 'sb_publishable_ZA6Ra_Sfi20g26DKGNeWXw_V0Qco0UW'
         'SUPABASE_URL': 'https://zaqbnznrfvapbgrjxskv.supabase.co'
         'SUPERWALL_PUBLIC_API_KEY': 'pk_OvYnX2VLOtoye5VWuNE1d'
+  EvolvTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: EvolvTests
+        excludes:
+          - Fixtures
+      - path: EvolvTests/Fixtures/Public
+        buildPhase: resources
+      - path: EvolvTests/Fixtures/StagedPrivate
+        buildPhase: resources
+    dependencies:
+      - target: Evolv
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.app.evolv.tests
+        GENERATE_INFOPLIST_FILE: YES
+        DEVELOPMENT_TEAM: 359J9B4674
+        CODE_SIGN_STYLE: Automatic
+        SWIFT_VERSION: "5.0"

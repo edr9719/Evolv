@@ -28,3 +28,17 @@ tenx/
 conversation.md
 PRODUCTION.md
 **/.tenx-source-manifest.json
+
+# Consented real-person analysis fixtures stay local-only
+ios/EvolvTests/Fixtures/Private/*
+!ios/EvolvTests/Fixtures/Private/README.md
+ios/EvolvTests/Fixtures/StagedPrivate/*
+!ios/EvolvTests/Fixtures/StagedPrivate/.keep
+
+# Analysis validation artifacts
+ios/build/analysis-validation/
+
+# Pilot researcher secrets, invite codes, downloads, and decrypted reports
+private/pilot/
+supabase/.temp/
+supabase/.branches/

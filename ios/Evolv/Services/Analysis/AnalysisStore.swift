@@ -4,7 +4,10 @@ import Foundation
 /// Analysis data is local-only; photos are never sent to any network.
 enum AnalysisStore {
 
-    static let currentAnalysisVersion = 1
+    /// Version 5 adds camera-configuration comparability. Legacy analyses are
+    /// re-run without losing scans or photos; unknown legacy camera metadata is
+    /// treated conservatively rather than rejected.
+    static let currentAnalysisVersion = 5
 
     // MARK: - Directory
 
@@ -12,6 +15,10 @@ enum AnalysisStore {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let dir = docs.appendingPathComponent("analysis", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? FileManager.default.setAttributes(
+            [.protectionKey: FileProtectionType.complete],
+            ofItemAtPath: dir.path
+        )
         return dir
     }
 
@@ -25,7 +32,7 @@ enum AnalysisStore {
     static func save(_ analysis: ScanAnalysis) {
         let url = fileURL(for: analysis.id)
         guard let data = try? JSONEncoder().encode(analysis) else { return }
-        try? data.write(to: url, options: .atomic)
+        try? data.write(to: url, options: [.atomic, .completeFileProtection])
     }
 
     // MARK: - Load
@@ -64,6 +71,20 @@ enum AnalysisStore {
             at: dir, includingPropertiesForKeys: nil
         ) else { return }
         contents.forEach { try? FileManager.default.removeItem(at: $0) }
+    }
+
+    static func protectExistingFiles() {
+        let dir = analysisDirectory
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: dir,
+            includingPropertiesForKeys: nil
+        ) else { return }
+        for file in contents where file.pathExtension.lowercased() == "json" {
+            try? FileManager.default.setAttributes(
+                [.protectionKey: FileProtectionType.complete],
+                ofItemAtPath: file.path
+            )
+        }
     }
 
     // MARK: - Reanalysis check

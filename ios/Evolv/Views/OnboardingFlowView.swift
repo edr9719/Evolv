@@ -1605,13 +1605,9 @@ private struct BaselineConfidence {
                 reasons.append("Some scan angles still missing — capture the remaining ones for stronger baseline.")
             }
 
-            if firstScan.lightingScore < 60 {
-                score -= 1
-                reasons.append("Lighting in your baseline scan was uneven. Match it next time for sharper reads.")
-            }
-            if firstScan.framingScore < 60 {
-                score -= 1
-                reasons.append("Framing was slightly off. Same distance and phone height each time helps a lot.")
+            let assessments = firstScan.standardCaptures.compactMap(\.assessment)
+            if assessments.contains(where: { $0.status != .ready }) {
+                reasons.append("Some photos could not be fully verified. Unsupported regions will be excluded rather than estimated.")
             }
         } else {
             reasons.append("No baseline photos yet. Your first scan from the home screen will lock that in.")

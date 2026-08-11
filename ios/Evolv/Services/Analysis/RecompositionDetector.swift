@@ -13,10 +13,10 @@ enum RecompositionDetector {
         guard smoothed.scanCount >= 3 else { return [] }
 
         let deltas = smoothed.smoothedDeltas
-        let waistDelta    = deltas[BodyRegion.waist.rawValue]     ?? 0
-        let armsDelta     = deltas[BodyRegion.arms.rawValue]      ?? 0
-        let shoulderDelta = deltas[BodyRegion.shoulders.rawValue] ?? 0
-        let chestDelta    = deltas[BodyRegion.chest.rawValue]     ?? 0
+        let waistDelta    = deltas[BodyRegion.waist.rawValue]
+        let armsDelta     = deltas[BodyRegion.arms.rawValue]
+        let shoulderDelta = deltas[BodyRegion.shoulders.rawValue]
+        let chestDelta    = deltas[BodyRegion.chest.rawValue]
         let taperDelta    = smoothed.smoothedTaperDelta
         let propDelta     = smoothed.smoothedProportionDelta
 
@@ -25,7 +25,8 @@ enum RecompositionDetector {
         var patterns: [RecompositionPattern] = []
 
         // Pattern 1: waist narrowing + arms stable (classic fat loss with muscle preservation)
-        if waistDelta < -0.015 && abs(armsDelta) < 0.008 {
+        if let waistDelta, let armsDelta,
+           waistDelta < -0.015 && abs(armsDelta) < 0.008 {
             patterns.append(.waistNarrowingArmsStable)
         }
 
@@ -35,23 +36,27 @@ enum RecompositionDetector {
         }
 
         // Pattern 3: torso narrowing + upper body stable
-        if waistDelta < -0.015 && shoulderDelta >= -0.005 && chestDelta >= -0.005 {
+        if let waistDelta, let shoulderDelta, let chestDelta,
+           waistDelta < -0.015 && shoulderDelta >= -0.005 && chestDelta >= -0.005 {
             patterns.append(.torsoNarrowingUpperBodyStable)
         }
 
         // Pattern 4: taper improvement with no overall size change
-        if taperDelta > 0.02 && abs(shoulderDelta) < 0.01 && abs(waistDelta) < 0.01 {
+        if let shoulderDelta, let waistDelta,
+           taperDelta > 0.02 && abs(shoulderDelta) < 0.01 && abs(waistDelta) < 0.01 {
             patterns.append(.taperImprovementNoSizeChange)
         }
 
         // Pattern 5: upper growth + waist stable or down (muscle gain with fat control)
-        if (shoulderDelta > 0.015 || chestDelta > 0.015 || armsDelta > 0.015)
+        if let shoulderDelta, let chestDelta, let armsDelta, let waistDelta,
+           (shoulderDelta > 0.015 || chestDelta > 0.015 || armsDelta > 0.015)
             && waistDelta <= 0.005 {
             patterns.append(.upperGrowthWaistStableOrDown)
         }
 
         // Pattern 6: all regions stable (maintenance)
-        let allStable = [waistDelta, armsDelta, shoulderDelta, chestDelta].allSatisfy { abs($0) < 0.008 }
+        let completeDeltas = [waistDelta, armsDelta, shoulderDelta, chestDelta].compactMap { $0 }
+        let allStable = completeDeltas.count == 4 && completeDeltas.allSatisfy { abs($0) < 0.008 }
         if allStable && goal == .maintain {
             patterns.append(.allRegionsStable)
         }

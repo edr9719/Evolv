@@ -1,219 +1,200 @@
 import Foundation
 
-/// Generates human-readable physique insights.
-/// Primary path: Supabase Edge Function → GPT-4o-mini.
-/// Fallback path: deterministic template system (offline-safe).
+/// Converts authoritative, on-device facts into restrained visual-shape wording.
+/// Cloud output is optional prose only: it is rejected if it invents tissue claims
+/// or contradicts the structured result.
 enum InsightEngine {
-
-    // MARK: - Public API
-
     static func generateInsight(
         signals: InterpretedSignals,
-        networkProxy: NetworkProxy
+        networkProxy: any InsightRequesting,
+        allowCloud: Bool = false,
+        now: Date = Date()
     ) async -> GeneratedInsight {
-        // Attempt LLM via proxy with one retry
-        if let insight = await requestWithRetry(signals: signals, proxy: networkProxy) {
+        guard signals.analysisAvailability == .comparable,
+              !signals.signals.isEmpty,
+              allowCloud else {
+            return templateFallback(signals: signals, now: now)
+        }
+
+        if let insight = await requestWithRetry(signals: signals, proxy: networkProxy),
+           InsightSafetyValidator.isSafe(insight, for: signals) {
             return insight
         }
-        return templateFallback(signals: signals)
+        return templateFallback(signals: signals, now: now)
     }
-
-    // MARK: - LLM
 
     private static func requestWithRetry(
         signals: InterpretedSignals,
-        proxy: NetworkProxy
+        proxy: any InsightRequesting
     ) async -> GeneratedInsight? {
         if let result = await proxy.requestInsight(signals: signals) { return result }
-        // Wait briefly then retry once
         try? await Task.sleep(nanoseconds: 5_000_000_000)
         return await proxy.requestInsight(signals: signals)
     }
 
-    // MARK: - Template Fallback
-
-    static func templateFallback(signals: InterpretedSignals) -> GeneratedInsight {
-        let headline = buildHeadline(signals: signals)
-        let detail   = buildDetail(signals: signals)
-        let caveat   = buildCaveat(signals: signals)
-        let momentum = buildMomentum(signals: signals)
-        let regionNotes = buildRegionNotes(signals: signals)
-
-        return GeneratedInsight(
-            headline: headline,
-            detail: detail,
-            caveat: caveat,
-            regionNotes: regionNotes,
-            momentum: momentum,
+    static func templateFallback(
+        signals: InterpretedSignals,
+        now: Date = Date()
+    ) -> GeneratedInsight {
+        GeneratedInsight(
+            headline: buildHeadline(signals),
+            detail: buildDetail(signals),
+            caveat: buildCaveat(signals),
+            regionNotes: buildRegionNotes(signals),
+            momentum: buildMomentum(signals),
             confidence: signals.overallConfidence,
-            generatedAt: Date(),
+            generatedAt: now,
             source: .templateFallback
         )
     }
 
-    // MARK: - Headline Templates
-
-    private static func buildHeadline(signals: InterpretedSignals) -> String {
-        if signals.reliabilityTier == .noData || signals.reliabilityTier == .baseline {
-            return "Baseline captured — keep scanning to reveal trends"
+    private static func buildHeadline(_ signals: InterpretedSignals) -> String {
+        switch signals.analysisAvailability {
+        case .processingFailed:
+            return "Photos saved — automatic analysis unavailable"
+        case .partialEvidence:
+            return "Not enough comparable evidence for a result"
+        case .baselineOnly:
+            return "Baseline saved — another comparable scan is required"
+        case .documentationOnly:
+            return "Photos saved — this extra scan is not used for comparison"
+        case .validationOnly:
+            return "Consistency-test set saved — excluded from progress"
+        case .comparable, .none:
+            break
         }
 
-        let patterns = signals.recompositionPatterns
-        if patterns.contains(.silhouetteImprovementWeightStable) {
-            return "Silhouette improving with stable weight — recomp in progress"
+        guard !signals.signals.isEmpty else {
+            return "Comparison saved — no supported regional result"
         }
-        if patterns.contains(.waistNarrowingArmsStable) {
-            return "Waist narrowing while muscle is preserved — solid fat loss signal"
+        if signals.signals.values.allSatisfy({ $0 == .neutral }) {
+            return "No meaningful visual change detected"
         }
-        if patterns.contains(.upperGrowthWaistStableOrDown) {
-            return "Upper body growing without waist expansion — good muscle gain signal"
+        if signals.thresholdsValidated != true {
+            return "Experimental visual difference detected"
         }
-
-        switch signals.goal {
-        case .fatLoss:
-            return headlineForFatLoss(signals: signals)
-        case .muscleGain:
-            return headlineForMuscleGain(signals: signals)
-        case .recomp:
-            return headlineForRecomp(signals: signals)
-        case .maintain:
-            return headlineForMaintain(signals: signals)
-        }
+        return "Comparable visual differences detected"
     }
 
-    private static func headlineForFatLoss(signals: InterpretedSignals) -> String {
-        let waist = signals.signals[BodyRegion.waist.rawValue] ?? .unclear
-        switch waist {
-        case .strongNegative, .moderateNegative: return "Meaningful fat loss signal detected"
-        case .minimalNegative: return "Early fat loss signal — stay the course"
-        case .neutral: return "No visible change yet — body may be adapting"
-        default: return "Mixed signals — consistency will clarify the trend"
+    private static func buildDetail(_ signals: InterpretedSignals) -> String {
+        switch signals.analysisAvailability {
+        case .processingFailed:
+            return "Evolv could not process enough evidence to compare this scan. No region was guessed."
+        case .partialEvidence:
+            return "The required same-pose evidence was missing or conflicted, so Evolv did not produce a visual-change claim."
+        case .baselineOnly:
+            return "This scan establishes your visual reference. Progress cannot be assessed from one scan."
+        case .documentationOnly:
+            return "Same-day extra photos remain documentation-only and cannot alter the canonical comparison."
+        case .validationOnly:
+            return "This set belongs only to the local consistency test and cannot alter your progress timeline."
+        case .comparable, .none:
+            break
         }
+
+        let descriptions = signals.signals
+            .sorted { $0.key < $1.key }
+            .compactMap { key, signal -> String? in
+                guard let region = BodyRegion(rawValue: key) else { return nil }
+                return factualSentence(region: region, signal: signal)
+            }
+        if descriptions.isEmpty {
+            return "Only supported regions are reported. Unsupported regions were omitted."
+        }
+        return descriptions.joined(separator: " ")
     }
 
-    private static func headlineForMuscleGain(signals: InterpretedSignals) -> String {
-        let arms      = signals.signals[BodyRegion.arms.rawValue]      ?? .unclear
-        let shoulders = signals.signals[BodyRegion.shoulders.rawValue] ?? .unclear
-        let chest     = signals.signals[BodyRegion.chest.rawValue]     ?? .unclear
-
-        let positiveSignals: [DirectionalSignal] = [arms, shoulders, chest]
-        let positiveCount = positiveSignals.filter { s -> Bool in
-            s == .strongPositive || s == .moderatePositive || s == .minimalPositive
-        }.count
-
-        if positiveCount >= 2 { return "Multiple muscle groups showing visual growth" }
-        if positiveCount == 1 { return "Early muscle gain signal in one region" }
-        return "No significant visible growth yet — strength gains may still be happening"
-    }
-
-    private static func headlineForRecomp(signals: InterpretedSignals) -> String {
-        if !signals.recompositionPatterns.isEmpty { return "Recomposition pattern detected" }
-        return "Body composition shifting — recomp takes time to show visually"
-    }
-
-    private static func headlineForMaintain(signals: InterpretedSignals) -> String {
-        let patterns = signals.recompositionPatterns
-        if patterns.contains(.allRegionsStable) { return "Physique is stable — maintenance on track" }
-        return "Minor variations detected — likely normal fluctuation"
-    }
-
-    // MARK: - Detail Templates
-
-    private static func buildDetail(signals: InterpretedSignals) -> String {
-        var parts: [String] = []
-
-        if signals.reliabilityTier == .baseline || signals.reliabilityTier == .earlyStage {
-            parts.append("With \(signals.scanCount) scan\(signals.scanCount == 1 ? "" : "s") logged, the system is still building a reliable baseline. Trends become clearer after 4+ consistent scans.")
-            return parts.joined(separator: " ")
-        }
-
-        let taperSignal = signals.taperSignal
-        if taperSignal == .strongPositive || taperSignal == .moderatePositive {
-            parts.append("Your shoulder-to-waist ratio has improved, suggesting meaningful body composition change.")
-        }
-
-        if signals.recompositionPatterns.contains(.waistNarrowingArmsStable) {
-            parts.append("Waist is narrowing while arm volume is being preserved — this is the fat loss signature you want to see.")
-        }
-
-        if signals.contextNotes.contains("possible_pump_state") {
-            parts.append("Note: this scan was marked as post-workout — arm/chest measurements may reflect pump rather than baseline size.")
-        }
-
-        if signals.signalConflicts.contains("waist_signal_conflict") {
-            parts.append("Visual and tape-measure waist signals disagree. This can happen when loose clothing or scan angle varies.")
-        }
-
-        if parts.isEmpty {
-            return "The analysis engine is collecting data. Keep scanning on your regular schedule and signals will sharpen over time."
-        }
-
-        return parts.joined(separator: " ")
-    }
-
-    // MARK: - Caveat Templates
-
-    private static func buildCaveat(signals: InterpretedSignals) -> String {
+    private static func buildCaveat(_ signals: InterpretedSignals) -> String {
         var caveats: [String] = []
-
-        if signals.scanQualityNotes.contains("partial_body_coverage") {
-            caveats.append("Partial body coverage may reduce accuracy for some regions.")
-        }
-        if signals.scanQualityNotes.contains("loose_clothing") {
-            caveats.append("Loose clothing reduces the precision of silhouette analysis.")
+        if signals.thresholdsValidated != true, signals.analysisAvailability == .comparable {
+            caveats.append("Non-neutral changes use provisional engineering thresholds and are experimental.")
         }
         if signals.overallConfidence == .low {
-            caveats.append("Confidence is low — more scans on schedule will improve reliability.")
+            caveats.append("Evidence strength is limited.")
         }
-        if signals.contextNotes.contains("possible_dehydration") {
-            caveats.append("Low hydration can temporarily make you appear leaner than your actual baseline.")
+        if signals.unavailableRegions?.isEmpty == false {
+            caveats.append("Unsupported regions were excluded rather than estimated.")
         }
-        if signals.contextNotes.contains("possible_water_retention") {
-            caveats.append("High hydration may temporarily inflate visual measurements.")
+        if signals.contextNotes.contains("possible_pump_state") {
+            caveats.append("A pre-workout scan may change the visible outline temporarily.")
         }
-
-        return caveats.isEmpty
-            ? "Results reflect visual silhouette analysis — not medical body composition measurement."
-            : caveats.joined(separator: " ")
+        if signals.contextNotes.contains("possible_dehydration")
+            || signals.contextNotes.contains("possible_water_retention") {
+            caveats.append("Hydration differences may change the visible outline temporarily.")
+        }
+        caveats.append("Evolv compares visual silhouettes; it does not measure tissue or medical body composition.")
+        return caveats.joined(separator: " ")
     }
 
-    // MARK: - Momentum
-
-    private static func buildMomentum(signals: InterpretedSignals) -> String {
-        let positiveSignals = signals.signals.values.filter {
-            $0 == .strongPositive || $0 == .moderatePositive
-        }.count
-        let negativeSignals = signals.signals.values.filter {
-            $0 == .strongNegative || $0 == .moderateNegative
-        }.count
-
-        if !signals.recompositionPatterns.isEmpty { return "Building" }
-        if positiveSignals >= 2 { return "Building" }
-        if negativeSignals >= 2 { return "Declining" }
-        return "Maintaining"
+    private static func buildMomentum(_ signals: InterpretedSignals) -> String {
+        guard signals.analysisAvailability == .comparable else { return "Unavailable" }
+        if signals.signals.values.allSatisfy({ $0 == .neutral }) { return "Stable" }
+        return signals.thresholdsValidated == true ? "Changed" : "Experimental"
     }
 
-    // MARK: - Region Notes
-
-    private static func buildRegionNotes(signals: InterpretedSignals) -> [String: String] {
-        var notes: [String: String] = [:]
-        for (region, signal) in signals.signals {
-            let note = regionNote(region: region, signal: signal, goal: signals.goal)
-            if !note.isEmpty { notes[region] = note }
-        }
-        return notes
+    private static func buildRegionNotes(_ signals: InterpretedSignals) -> [String: String] {
+        Dictionary(uniqueKeysWithValues: signals.signals.compactMap { key, signal in
+            guard let region = BodyRegion(rawValue: key),
+                  let sentence = factualSentence(region: region, signal: signal) else { return nil }
+            return (key, sentence)
+        })
     }
 
-    private static func regionNote(region: String, signal: DirectionalSignal, goal: FitnessGoal) -> String {
+    private static func factualSentence(
+        region: BodyRegion,
+        signal: DirectionalSignal
+    ) -> String? {
         switch signal {
-        case .strongPositive:   return "Strong positive change detected."
-        case .moderatePositive: return "Moderate positive trend."
-        case .minimalPositive:  return "Slight positive trend — early signal."
-        case .neutral:          return ""
-        case .minimalNegative:  return "Slight decrease — within normal variation."
-        case .moderateNegative: return "Moderate decrease detected."
-        case .strongNegative:   return "Strong decrease — review your approach."
-        case .unclear:          return "Insufficient data for this region."
+        case .strongPositive, .moderatePositive, .minimalPositive:
+            return "\(region.visualLabel) increased."
+        case .neutral:
+            return "\(region.visualLabel) remained stable."
+        case .minimalNegative, .moderateNegative, .strongNegative:
+            return "\(region.visualLabel) decreased."
+        case .unclear:
+            return nil
         }
+    }
+}
+
+enum InsightSafetyValidator {
+    private static let forbiddenClaims = [
+        "fat loss", "lost fat", "muscle gain", "gained muscle",
+        "muscle preserved", "body composition", "recomposition",
+        "recomp", "lean mass", "body fat", "leaner", "more muscular",
+        "less muscular", "toned", "progress detected", "progress made",
+        "transformation detected"
+    ]
+
+    static func isSafe(_ insight: GeneratedInsight, for signals: InterpretedSignals) -> Bool {
+        let fields = [insight.headline, insight.detail, insight.caveat, insight.momentum]
+            + insight.regionNotes.flatMap { [$0.key, $0.value] }
+        let text = fields.joined(separator: " ").lowercased()
+
+        guard !forbiddenClaims.contains(where: text.contains) else { return false }
+
+        for (key, signal) in signals.signals {
+            guard let region = BodyRegion(rawValue: key) else { continue }
+            let labels = [region.rawValue.lowercased(), region.visualLabel.lowercased()]
+            let relevant = fields
+                .flatMap { $0.lowercased().components(separatedBy: CharacterSet(charactersIn: ".!?;")) }
+                .filter { sentence in labels.contains(where: sentence.contains) }
+                .joined(separator: " ")
+            guard !relevant.isEmpty else { continue }
+            let increasedWords = ["increased", "increase", "wider", "larger", "grew", "growth"]
+            let decreasedWords = ["decreased", "decrease", "narrower", "smaller", "reduced", "narrowing"]
+            switch signal {
+            case .strongPositive, .moderatePositive, .minimalPositive:
+                if decreasedWords.contains(where: relevant.contains) { return false }
+            case .minimalNegative, .moderateNegative, .strongNegative:
+                if increasedWords.contains(where: relevant.contains) { return false }
+            case .neutral:
+                if increasedWords.contains(where: relevant.contains)
+                    || decreasedWords.contains(where: relevant.contains) { return false }
+            case .unclear:
+                continue
+            }
+        }
+        return true
     }
 }

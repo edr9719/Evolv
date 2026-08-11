@@ -171,7 +171,7 @@ enum NotificationManager {
                 identifier: "\(reminderIdentifierPrefix).test",
                 content: content, trigger: trigger
             )
-            UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
+            try? await UNUserNotificationCenter.current().add(request)
         }
     }
 }

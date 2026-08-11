@@ -1,39 +1,174 @@
 import Foundation
 import UIKit
+import OSLog
 
 /// Persists captured pose images to the app's Documents directory and loads them back.
 enum PhotoStore {
-    private static var folder: URL {
+    static let protectedWriteOptions: Data.WritingOptions = [.atomic, .completeFileProtection]
+
+    struct PreparedPhoto {
+        let image: UIImage
+        let pixelSize: NormalizedPixelSize
+    }
+
+    enum StoreError: LocalizedError {
+        case couldNotCreateDirectory
+        case couldNotEncode
+        case couldNotWrite
+
+        var errorDescription: String? {
+            switch self {
+            case .couldNotCreateDirectory: return "Evolv couldn't prepare local photo storage."
+            case .couldNotEncode: return "Evolv couldn't process this photo."
+            case .couldNotWrite: return "Evolv couldn't save the photo to this device."
+            }
+        }
+    }
+
+    private static let logger = Logger(subsystem: "com.app.evolv", category: "PhotoStore")
+
+    private static func folder() throws -> URL {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let url = docs.appendingPathComponent("scans", isDirectory: true)
         if !FileManager.default.fileExists(atPath: url.path) {
-            try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            do {
+                try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            } catch {
+                throw StoreError.couldNotCreateDirectory
+            }
         }
+        try? applyCompleteProtection(to: url)
         return url
     }
 
-    @discardableResult
-    static func save(_ image: UIImage, filename: String? = nil) -> String? {
-        let name = filename ?? "\(UUID().uuidString).jpg"
-        let url = folder.appendingPathComponent(name)
-        guard let data = image.jpegData(compressionQuality: 0.86) else { return nil }
-        do {
-            try data.write(to: url, options: .atomic)
-            return name
-        } catch {
-            return nil
+    private static func applyCompleteProtection(to url: URL) throws {
+        try FileManager.default.setAttributes(
+            [.protectionKey: FileProtectionType.complete],
+            ofItemAtPath: url.path
+        )
+    }
+
+    /// Renders UIImage orientation into upright pixels and caps the long edge so
+    /// Vision, previews, and persistence all consume the same representation.
+    static func prepare(_ image: UIImage, maxLongEdge: CGFloat = 2048) -> PreparedPhoto {
+        let rawPixelSize: CGSize = image.cgImage.map {
+            CGSize(width: $0.width, height: $0.height)
+        } ?? CGSize(width: image.size.width * image.scale, height: image.size.height * image.scale)
+        let logicalSize: CGSize
+        switch image.imageOrientation {
+        case .left, .leftMirrored, .right, .rightMirrored:
+            logicalSize = CGSize(width: rawPixelSize.height, height: rawPixelSize.width)
+        default:
+            logicalSize = rawPixelSize
         }
+        let longest = max(logicalSize.width, logicalSize.height)
+        let resizeScale = longest > maxLongEdge ? maxLongEdge / longest : 1
+        let targetSize = CGSize(
+            width: max(1, (logicalSize.width * resizeScale).rounded()),
+            height: max(1, (logicalSize.height * resizeScale).rounded())
+        )
+
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let upright = UIGraphicsImageRenderer(size: targetSize, format: format).image { context in
+            UIColor.black.setFill()
+            context.fill(CGRect(origin: .zero, size: targetSize))
+            image.draw(in: CGRect(origin: .zero, size: targetSize))
+        }
+
+        return PreparedPhoto(
+            image: upright,
+            pixelSize: NormalizedPixelSize(width: Int(targetSize.width), height: Int(targetSize.height))
+        )
+    }
+
+    /// JPEG encoding and atomic disk I/O run away from the main actor.
+    @discardableResult
+    static func save(_ image: UIImage, filename: String? = nil) async throws -> String {
+        let name = filename ?? "\(UUID().uuidString).jpg"
+        let started = ContinuousClock.now
+        return try await Task.detached(priority: .utility) {
+            guard let data = image.jpegData(compressionQuality: 0.90) else {
+                logger.error("photo_save_failed reason=encode")
+                throw StoreError.couldNotEncode
+            }
+            let directory = try folder()
+            let url = directory.appendingPathComponent(name)
+            do {
+                try data.write(to: url, options: protectedWriteOptions)
+                // Explicitly upgrade the finished destination as well. Atomic
+                // writes replace the destination inode, so this closes a gap
+                // on systems that do not carry directory protection forward.
+                try? applyCompleteProtection(to: url)
+                let elapsed = started.duration(to: .now)
+                logger.info("photo_save_succeeded duration=\(String(describing: elapsed), privacy: .public)")
+                return name
+            } catch {
+                logger.error("photo_save_failed reason=write")
+                throw StoreError.couldNotWrite
+            }
+        }.value
+    }
+
+    /// Testable variant used to verify atomic-write failures without changing app storage.
+    static func save(_ image: UIImage, filename: String, in directory: URL) async throws -> String {
+        try await Task.detached(priority: .utility) {
+            guard let data = image.jpegData(compressionQuality: 0.90) else {
+                throw StoreError.couldNotEncode
+            }
+            let url = directory.appendingPathComponent(filename)
+            do {
+                try data.write(to: url, options: .atomic)
+                return filename
+            } catch {
+                throw StoreError.couldNotWrite
+            }
+        }.value
     }
 
     static func loadImage(named name: String) -> UIImage? {
-        let url = folder.appendingPathComponent(name)
+        guard let directory = try? folder() else { return nil }
+        let url = directory.appendingPathComponent(name)
         guard let data = try? Data(contentsOf: url) else { return nil }
         return UIImage(data: data)
     }
 
     static func delete(named name: String) {
-        let url = folder.appendingPathComponent(name)
-        try? FileManager.default.removeItem(at: url)
+        guard let directory = try? folder() else { return }
+        let url = directory.appendingPathComponent(name)
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch {
+            if (error as NSError).code != NSFileNoSuchFileError {
+                logger.error("photo_delete_failed reason=file_io")
+            }
+        }
+    }
+
+    static func delete<S: Sequence>(named names: S) where S.Element == String {
+        names.forEach { delete(named: $0) }
+    }
+
+    /// Upgrades photos created by earlier builds without re-encoding them.
+    static func protectExistingFiles() {
+        guard let directory = try? folder(),
+              let files = try? FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: nil
+              ) else { return }
+        try? applyCompleteProtection(to: directory)
+        for file in files where file.pathExtension.lowercased() == "jpg" {
+            try? applyCompleteProtection(to: file)
+        }
+    }
+
+    static func fileProtection(for name: String) -> FileProtectionType? {
+        guard let directory = try? folder(),
+              let attributes = try? FileManager.default.attributesOfItem(
+                atPath: directory.appendingPathComponent(name).path
+              ) else { return nil }
+        return attributes[.protectionKey] as? FileProtectionType
     }
 
     // MARK: - Image analysis (local, lightweight)

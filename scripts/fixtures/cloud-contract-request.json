@@ -1,0 +1,23 @@
+{
+  "signals": {
+    "scanCount": 2,
+    "weeksTracked": 1,
+    "reliabilityTier": "earlyStage",
+    "goal": "Maintain",
+    "overallConfidence": "low",
+    "signals": {"waist":"neutral"},
+    "taperSignal": "unclear",
+    "proportionSignal": "unclear",
+    "measurementAlignment": {},
+    "recompositionPatterns": [],
+    "scanQualityNotes": [],
+    "signalConflicts": [],
+    "contextNotes": [],
+    "unavailableRegions": {"arms":"insufficient_supported_comparison_evidence"},
+    "analysisAvailability": "comparable",
+    "goalAlignments": {"waist":"neutral"},
+    "signalSemanticsVersion": 2,
+    "thresholdSetIdentifier": "engineering-v1",
+    "thresholdsValidated": false
+  }
+}

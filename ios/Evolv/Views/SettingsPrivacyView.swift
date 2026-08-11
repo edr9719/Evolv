@@ -17,6 +17,84 @@ struct PrivacySettingsView: View {
                 VStack(spacing: 18) {
                     privacyHero
 
+                    SettingsGroup(
+                        header: "Cloud insights",
+                        footer: "When enabled, Evolv sends an anonymous derived trend summary—not photos, filenames, landmarks, or raw measurements—to its insight service."
+                    ) {
+                        Toggle(isOn: cloudInsightsBinding) {
+                            HStack(spacing: 14) {
+                                Image(systemName: "cloud")
+                                    .font(.system(size: 14, weight: .medium))
+                                    .foregroundStyle(EvolvTheme.text)
+                                    .frame(width: 26)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Cloud-written insights")
+                                        .font(.system(size: 14.5, weight: .semibold, design: .rounded))
+                                        .foregroundStyle(EvolvTheme.text)
+                                    Text(app.profile.usesCloudInsights ? "Enabled" : "Off — summaries are generated on device")
+                                        .font(.system(size: 12, design: .rounded))
+                                        .foregroundStyle(EvolvTheme.textMuted)
+                                }
+                            }
+                        }
+                        .tint(EvolvTheme.accent)
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 14)
+                    }
+
+                    SettingsGroup(
+                        header: "Consistency pilot",
+                        footer: "Pilot sharing and cloud-written insights are separate choices. Joining one never enables the other."
+                    ) {
+                        NavigationLink(destination: PilotDataSharingView()) {
+                            HStack(spacing: 14) {
+                                Image(systemName: "checkmark.shield")
+                                    .font(.system(size: 14, weight: .medium))
+                                    .foregroundStyle(EvolvTheme.text)
+                                    .frame(width: 26)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Pilot data sharing")
+                                        .font(.system(size: 14.5, weight: .semibold, design: .rounded))
+                                        .foregroundStyle(EvolvTheme.text)
+                                    Text(PilotStudyStore.loadEnrollment()?.status == .active ? "Active — review or withdraw" : "Off or not enrolled")
+                                        .font(.system(size: 12, design: .rounded))
+                                        .foregroundStyle(EvolvTheme.textMuted)
+                                }
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(EvolvTheme.textFaint)
+                            }
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 14)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    SettingsGroup(
+                        header: "Backup & recovery",
+                        footer: "Apple controls device backups. Removing Evolv from backup can make scans unrecoverable after deleting the app or replacing this iPhone."
+                    ) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Scans use Evolv's private app storage. Apple may include that app data in an iCloud or computer backup, depending on your settings.")
+                                .font(.system(size: 12.5, design: .rounded))
+                                .foregroundStyle(EvolvTheme.textMuted)
+                                .lineSpacing(3)
+                            Link(destination: URL(string: "https://support.apple.com/108922")!) {
+                                HStack {
+                                    Text("How to manage Apple backups")
+                                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                    Spacer()
+                                    Image(systemName: "arrow.up.right")
+                                        .font(.system(size: 11, weight: .semibold))
+                                }
+                                .foregroundStyle(EvolvTheme.accent)
+                            }
+                        }
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 14)
+                    }
+
                     SettingsGroup(header: "Manage") {
                         actionRow(
                             icon: "rectangle.stack",
@@ -39,7 +117,7 @@ struct PrivacySettingsView: View {
 
                     SettingsGroup(
                         header: "Delete",
-                        footer: "Deletions are permanent. Evolv has no cloud copy."
+                        footer: "Deletions are permanent inside Evolv. Apple device backups may retain an earlier app-data snapshot until those backups are updated or removed."
                     ) {
                         actionRow(
                             icon: "trash",
@@ -82,7 +160,7 @@ struct PrivacySettingsView: View {
                 app.resetAll()
             }
         } message: {
-            Text("This erases everything: profile, scans, measurements, and onboarding. You'll start fresh.")
+            Text("This erases the local profile, scans, measurements, and onboarding. It does not delete pilot data already shared with Evolv; use Pilot data sharing first if you want that deleted too.")
         }
         .sheet(isPresented: $showManageScans) {
             ManageScansSheet()
@@ -109,15 +187,17 @@ struct PrivacySettingsView: View {
                     Text("Your data belongs to you.")
                         .font(.system(size: 15, weight: .semibold, design: .rounded))
                         .foregroundStyle(EvolvTheme.text)
-                    Text("Scans and measurements stay on this device.")
+                    Text("Your photos stay private unless you explicitly select pilot photos to share.")
                         .font(.system(size: 12.5, design: .rounded))
                         .foregroundStyle(EvolvTheme.textMuted)
                 }
                 Spacer()
             }
             VStack(alignment: .leading, spacing: 8) {
-                privacyBullet("camera", "Photos are saved locally — never uploaded.")
-                privacyBullet("wifi.slash", "Evolv works offline. No accounts. No analytics.")
+                privacyBullet("camera", "Your photos stay on this iPhone unless you explicitly choose specific photos to share with Evolv.")
+                privacyBullet("lock", "Scan files use complete protection while your iPhone is locked.")
+                privacyBullet("wifi.slash", "Evolv works offline. Cloud-written wording is optional.")
+                privacyBullet("icloud", "Apple may include app data in device backups, based on your settings.")
                 privacyBullet("hand.raised", "Delete anything, anytime, with one tap.")
             }
         }
@@ -130,6 +210,16 @@ struct PrivacySettingsView: View {
                         .stroke(EvolvTheme.stroke, lineWidth: 1)
                 }
         }
+    }
+
+    private var cloudInsightsBinding: Binding<Bool> {
+        Binding(
+            get: { app.profile.usesCloudInsights },
+            set: { enabled in
+                app.profile.cloudInsightsEnabled = enabled
+                app.save()
+            }
+        )
     }
 
     private func privacyBullet(_ icon: String, _ text: String) -> some View {
@@ -203,7 +293,7 @@ private struct ManageScansSheet: View {
                                         Text(scan.date, format: .dateTime.day().month(.wide).year())
                                             .font(.system(size: 14, weight: .semibold, design: .rounded))
                                             .foregroundStyle(EvolvTheme.text)
-                                        Text("\(scan.captures.count) photo\(scan.captures.count == 1 ? "" : "s") · consistency \(scan.consistencyScore)")
+                                        Text("\(scan.captures.count) photo\(scan.captures.count == 1 ? "" : "s") · \(scan.analysisAvailability?.label ?? "legacy evidence")")
                                             .font(.system(size: 12, design: .rounded))
                                             .foregroundStyle(EvolvTheme.textMuted)
                                     }
@@ -271,7 +361,7 @@ private struct ExportDataSheet: View {
                 Text("Export coming soon")
                     .font(.system(size: 20, weight: .semibold, design: .rounded))
                     .foregroundStyle(EvolvTheme.text)
-                Text("We're preparing a clean, portable bundle of your scans, measurements, and timeline notes. Until it ships, your data stays safely on this device.")
+                Text("We're preparing a clean, portable bundle of your scans, measurements, timeline notes, and pilot-sharing receipts. A future export will distinguish local scan data from anything you explicitly shared with the pilot.")
                     .font(.system(size: 13.5, design: .rounded))
                     .foregroundStyle(EvolvTheme.textMuted)
                     .multilineTextAlignment(.center)
@@ -378,7 +468,7 @@ struct SubscriptionSettingsView: View {
 
     private var footerCopy: String {
         if isPremium {
-            return "Manage or cancel your subscription anytime from the App Store. Your scans and measurements always stay on this device."
+            return "Manage or cancel your subscription anytime from the App Store. Scan photos stay local unless you explicitly select specific photos for the invited consistency pilot."
         }
         return "Premium unlocks unlimited scans, full AI analysis, and long-term comparisons. Billing is currently in test mode — purchases on this device do not bill a real card."
     }

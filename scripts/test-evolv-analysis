@@ -1,0 +1,255 @@
+#!/bin/zsh
+set -euo pipefail
+
+SCRIPT_DIR=${0:A:h}
+REPO_ROOT=${SCRIPT_DIR:h}
+IOS_DIR="$REPO_ROOT/ios"
+PROJECT="$IOS_DIR/Evolv.xcodeproj"
+SCHEME="Evolv"
+MODE=${1:-all}
+DEVICE_UDID=${EVOLV_DEVICE_UDID:-}
+SIMULATOR_DESTINATION=${EVOLV_SIMULATOR_DESTINATION:-"platform=iOS Simulator,name=iPhone 17 Pro,OS=latest"}
+RUN_STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+REPORT_ROOT="$IOS_DIR/build/analysis-validation/$RUN_STAMP"
+PRIVATE_DIR="$IOS_DIR/EvolvTests/Fixtures/Private"
+STAGED_ROOT="$IOS_DIR/EvolvTests/Fixtures/StagedPrivate"
+STAGED_RUN=""
+
+usage() {
+  print "Usage: scripts/test-evolv-analysis unit|device|cloud-contract|all [--device UDID]"
+  print "Set EVOLV_SIMULATOR_DESTINATION to override the unit-test simulator."
+}
+
+if [[ "$MODE" != "unit" && "$MODE" != "device" && "$MODE" != "cloud-contract" && "$MODE" != "all" ]]; then
+  usage
+  exit 64
+fi
+shift || true
+while (( $# > 0 )); do
+  case "$1" in
+    --device)
+      [[ $# -ge 2 ]] || { usage; exit 64; }
+      DEVICE_UDID=$2
+      shift 2
+      ;;
+    *)
+      print -u2 "Unknown argument: $1"
+      usage
+      exit 64
+      ;;
+  esac
+done
+
+mkdir -p "$REPORT_ROOT"
+
+cleanup() {
+  if [[ -n "$STAGED_RUN" && "$STAGED_RUN" == "$STAGED_ROOT"/run.* && -d "$STAGED_RUN" ]]; then
+    rm -rf -- "$STAGED_RUN"
+    (cd "$IOS_DIR" && xcodegen generate --spec project.yml >/dev/null) || true
+  fi
+}
+trap cleanup EXIT INT TERM
+
+unstage_private_fixtures() {
+  if [[ -n "$STAGED_RUN" && "$STAGED_RUN" == "$STAGED_ROOT"/run.* && -d "$STAGED_RUN" ]]; then
+    rm -rf -- "$STAGED_RUN"
+    STAGED_RUN=""
+    (cd "$IOS_DIR" && xcodegen generate --spec project.yml >/dev/null)
+  fi
+}
+
+guard_private_fixtures() {
+  local tracked
+  tracked=$(cd "$REPO_ROOT" && git ls-files \
+    'ios/EvolvTests/Fixtures/Private/*' \
+    'ios/EvolvTests/Fixtures/StagedPrivate/*' \
+    | rg -v '(Private/README\.md|StagedPrivate/\.keep)$' || true)
+  if [[ -n "$tracked" ]]; then
+    print -u2 "Private fixture guard failed. These files are Git-tracked:"
+    print -u2 "$tracked"
+    exit 65
+  fi
+  if rg -q 'Fixtures/(Private|StagedPrivate)' "$PROJECT/project.pbxproj" \
+      && rg -q 'Evolv\.app.*Fixtures/(Private|StagedPrivate)' "$PROJECT/project.pbxproj"; then
+    print -u2 "Private fixtures must never be part of the Evolv app target."
+    exit 65
+  fi
+}
+
+stage_private_fixtures() {
+  local private_files
+  private_files=$(find "$PRIVATE_DIR" -type f ! -name README.md -print -quit)
+  [[ -n "$private_files" ]] || return 0
+  STAGED_RUN=$(mktemp -d "$STAGED_ROOT/run.XXXXXX")
+  cp -R "$PRIVATE_DIR"/. "$STAGED_RUN"/
+  (cd "$IOS_DIR" && xcodegen generate --spec project.yml >/dev/null)
+}
+
+export_results() {
+  local result_bundle=$1
+  local output_dir=$2
+  [[ -d "$result_bundle" ]] || return 0
+  xcrun xcresulttool get test-results summary --path "$result_bundle" > "$output_dir/summary.json" || true
+  xcrun xcresulttool get test-results tests --path "$result_bundle" > "$output_dir/tests.json" || true
+  mkdir -p "$output_dir/attachments"
+  xcrun xcresulttool export attachments \
+    --path "$result_bundle" \
+    --output-path "$output_dir/attachments" >/dev/null || true
+  if [[ -f "$output_dir/tests.json" ]]; then
+    jq -r '
+      ["test","result","duration"],
+      (.. | objects | select(.name? and .result? and .duration?) |
+       [.name, .result, .duration]) | @csv
+    ' "$output_dir/tests.json" > "$output_dir/results.csv"
+  fi
+}
+
+run_unit() {
+  local output_dir="$REPORT_ROOT/unit"
+  local result_bundle="$output_dir/Evolv-Unit.xcresult"
+  mkdir -p "$output_dir"
+  set +e
+  xcodebuild \
+    -project "$PROJECT" \
+    -scheme "$SCHEME" \
+    -testPlan Evolv-Unit \
+    -destination "$SIMULATOR_DESTINATION" \
+    -resultBundlePath "$result_bundle" \
+    CODE_SIGNING_ALLOWED=NO \
+    test 2>&1 | tee "$output_dir/xcodebuild.log"
+  local exit_code=${pipestatus[1]}
+  set -e
+  export_results "$result_bundle" "$output_dir"
+  (( exit_code == 0 )) || return "$exit_code"
+}
+
+device_preflight() {
+  [[ -n "$DEVICE_UDID" ]] || {
+    print -u2 "Device mode requires an explicit physical iPhone: --device UDID"
+    exit 66
+  }
+  if xcrun simctl list devices | rg -q "$DEVICE_UDID"; then
+    print -u2 "Simulator destinations are forbidden for Evolv Vision device tests."
+    exit 66
+  fi
+
+  local details="$REPORT_ROOT/device-details.json"
+  local lock_state="$REPORT_ROOT/device-lock-state.json"
+  xcrun devicectl device info details --device "$DEVICE_UDID" --timeout 20 --json-output "$details" >/dev/null || {
+    print -u2 "The requested iPhone is not connected and available through CoreDevice."
+    exit 66
+  }
+  jq -e --arg device_id "$DEVICE_UDID" '
+    .result.hardwareProperties.reality == "physical" and
+    (
+      .result.identifier == $device_id or
+      .result.hardwareProperties.udid == $device_id
+    ) and
+    .result.connectionProperties.pairingState == "paired" and
+    .result.connectionProperties.tunnelState == "connected"
+  ' "$details" >/dev/null || {
+    print -u2 "The requested iPhone must be physical, paired, and connected."
+    exit 66
+  }
+  xcrun devicectl device info lockState --device "$DEVICE_UDID" --timeout 20 --json-output "$lock_state" >/dev/null
+  jq -e '
+    .result.passcodeRequired == false or
+    ([.. | strings | ascii_downcase] | any(contains("unlocked"))) or
+    ([paths(scalars) as $p |
+      select(($p[-1] | tostring | ascii_downcase) == "locked") |
+      getpath($p)] | any(. == false))
+  ' "$lock_state" >/dev/null || {
+    print -u2 "Unlock the iPhone before running the Vision plan."
+    exit 66
+  }
+  jq -e '
+    ([paths(scalars) as $p |
+      select(($p[-1] | tostring | ascii_downcase | contains("developermode"))) |
+      getpath($p) | tostring | ascii_downcase] |
+      any(. == "enabled" or . == "true"))
+  ' "$details" >/dev/null || [[ "${EVOLV_DEVELOPER_MODE_CONFIRMED:-0}" == "1" ]] || {
+    print -u2 "Developer Mode must be enabled on the iPhone."
+    exit 66
+  }
+  local free_bytes
+  free_bytes=$(jq -r '
+    [paths(numbers) as $p |
+      select(($p[-1] | tostring | ascii_downcase |
+        test("(available|free).*(capacity|storage|space|bytes)"))) |
+      getpath($p)] | max // 0
+  ' "$details")
+  (( free_bytes >= 1000000000 )) || [[ "${EVOLV_DEVICE_STORAGE_CONFIRMED:-0}" == "1" ]] || {
+    print -u2 "At least 1 GB of reported free device storage is required."
+    exit 66
+  }
+}
+
+run_device() {
+  device_preflight
+  stage_private_fixtures
+  local output_dir="$REPORT_ROOT/device"
+  local result_bundle="$output_dir/Evolv-Vision-Device.xcresult"
+  mkdir -p "$output_dir"
+  set +e
+  xcodebuild \
+    -project "$PROJECT" \
+    -scheme "$SCHEME" \
+    -testPlan Evolv-Vision-Device \
+    -destination "platform=iOS,id=$DEVICE_UDID" \
+    -resultBundlePath "$result_bundle" \
+    test 2>&1 | tee "$output_dir/xcodebuild.log"
+  local exit_code=${pipestatus[1]}
+  set -e
+  export_results "$result_bundle" "$output_dir"
+  unstage_private_fixtures
+  (( exit_code == 0 )) || return "$exit_code"
+}
+
+run_cloud_contract() {
+  local output_dir="$REPORT_ROOT/cloud-contract"
+  mkdir -p "$output_dir"
+  xcodebuild \
+    -project "$PROJECT" \
+    -scheme "$SCHEME" \
+    -testPlan Evolv-Unit \
+    -destination "$SIMULATOR_DESTINATION" \
+    CODE_SIGNING_ALLOWED=NO \
+    -only-testing:EvolvTests/ScanPolicyPrivacyTests/testCloudPayloadContainsOnlyDerivedSignals \
+    -only-testing:EvolvTests/AnalysisV4Tests/testUnsafeCloudWordingIsRejected \
+    test 2>&1 | tee "$output_dir/local-contract.log"
+
+  [[ -n "${EVOLV_CLOUD_CONTRACT_URL:-}" ]] || {
+    print "Cloud endpoint not configured; mocked local contract passed."
+    return 0
+  }
+  local auth_args=()
+  if [[ -n "${EVOLV_CLOUD_CONTRACT_KEY:-}" ]]; then
+    auth_args=(-H "Authorization: Bearer $EVOLV_CLOUD_CONTRACT_KEY" -H "apikey: $EVOLV_CLOUD_CONTRACT_KEY")
+  fi
+  curl --fail-with-body --silent --show-error \
+    -H 'Content-Type: application/json' \
+    "${auth_args[@]}" \
+    --data-binary "@$SCRIPT_DIR/fixtures/cloud-contract-request.json" \
+    "$EVOLV_CLOUD_CONTRACT_URL" > "$output_dir/response.json"
+  jq -e 'has("headline") and has("detail") and has("caveat") and has("regionNotes")' \
+    "$output_dir/response.json" >/dev/null
+  if rg -i -q 'fat loss|lost fat|muscle gain|gained muscle|body composition|recomposition|body fat' \
+      "$output_dir/response.json"; then
+    print -u2 "Cloud contract returned a prohibited analytical claim."
+    exit 67
+  fi
+}
+
+guard_private_fixtures
+case "$MODE" in
+  unit) run_unit ;;
+  device) run_device ;;
+  cloud-contract) run_cloud_contract ;;
+  all)
+    run_unit
+    run_device
+    run_cloud_contract
+    ;;
+esac
+
+print "Evolv validation completed. Reports: $REPORT_ROOT"

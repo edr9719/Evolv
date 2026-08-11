@@ -35,7 +35,7 @@ struct SettingsView: View {
                             SettingsRowLink(
                                 icon: "lock.shield",
                                 title: "Privacy & Data",
-                                subtitle: "Stored locally on this device",
+                                subtitle: "Local by default · sharing optional",
                                 destination: { PrivacySettingsView() }
                             )
                             SettingsRowLink(
@@ -44,6 +44,15 @@ struct SettingsView: View {
                                 subtitle: "Free plan",
                                 destination: { SubscriptionSettingsView() }
                             )
+
+                            if ValidationProgramAvailability.isEnabled {
+                                SettingsRowLink(
+                                    icon: "checkmark.arrow.trianglehead.counterclockwise",
+                                    title: "Help test Evolv",
+                                    subtitle: "Five-set consistency check",
+                                    destination: { ValidationStudyView() }
+                                )
+                            }
             
                             Text("Your data belongs to you.")
                                 .font(.system(size: 12, weight: .medium, design: .rounded))

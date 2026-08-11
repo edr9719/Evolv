@@ -1,0 +1,176 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "csv"
+require "json"
+
+input = ARGV[0]
+output = ARGV[1]
+abort "Usage: scripts/evolv-validation-stats INPUT.csv [OUTPUT.json]" unless input && File.file?(input)
+
+table = CSV.read(input, headers: true)
+rows = table.map(&:to_h)
+required = %w[
+  participant_id split comparison_id region expected_condition result_status
+  evidence_strength feature_baseline feature_current pose_match pose_spread
+  body_type skin_tone clothing device environment
+]
+missing = required - (table.headers || [])
+abort "Missing columns: #{missing.join(', ')}" unless missing.empty?
+
+participants_by_split = rows.group_by { |row| row["split"] }.transform_values do |values|
+  values.map { |row| row["participant_id"] }.uniq.sort
+end
+overlap = (participants_by_split["calibration"] || []) & (participants_by_split["heldout"] || [])
+abort "Participants occur in both calibration and heldout: #{overlap.join(', ')}" unless overlap.empty?
+
+def number(value)
+  Float(value)
+rescue ArgumentError, TypeError
+  nil
+end
+
+def percentile(values, proportion)
+  sorted = values.compact.sort
+  return nil if sorted.empty?
+  sorted[[(proportion * (sorted.length - 1)).round, sorted.length - 1].min]
+end
+
+def mean(values)
+  values.empty? ? nil : values.sum.to_f / values.length
+end
+
+def sample_sd(values)
+  return nil if values.length < 2
+  average = mean(values)
+  Math.sqrt(values.sum { |value| (value - average)**2 } / (values.length - 1))
+end
+
+stable_condition = lambda do |row|
+  %w[stable_exact stable_repeat transformed_valid].include?(row["expected_condition"])
+end
+non_neutral = lambda { |row| %w[increase decrease].include?(row["result_status"]) }
+unavailable = lambda { |row| row["result_status"] == "unavailable" }
+
+calibration = rows.select { |row| row["split"] == "calibration" && stable_condition.call(row) }
+thresholds = calibration.group_by { |row| row["region"] }.transform_values do |values|
+  deltas = values.map do |row|
+    baseline = number(row["feature_baseline"])
+    current = number(row["feature_current"])
+    next unless baseline && current && baseline.positive?
+    ((current - baseline) / baseline).abs
+  end.compact
+  accepted = values.reject { |row| unavailable.call(row) }
+  {
+    "stable_band_p95" => percentile(deltas, 0.95),
+    "pose_match_p05" => percentile(accepted.map { |row| number(row["pose_match"]) }.compact, 0.05),
+    "conflict_limit_p95" => percentile(accepted.map { |row| number(row["pose_spread"]) }.compact, 0.95),
+    "sample_size" => values.length
+  }
+end
+
+heldout = rows.select { |row| row["split"] == "heldout" && stable_condition.call(row) }
+clusters = heldout.group_by { |row| row["participant_id"] }.transform_values do |values|
+  supported = values.reject { |row| unavailable.call(row) }
+  {
+    error_rate: supported.empty? ? 0.0 : supported.count { |row| non_neutral.call(row) }.to_f / supported.length,
+    abstention_rate: values.empty? ? 0.0 : values.count { |row| unavailable.call(row) }.to_f / values.length
+  }
+end
+
+cluster_error_rate = mean(clusters.values.map { |value| value[:error_rate] }) || 0.0
+cluster_abstention_rate = mean(clusters.values.map { |value| value[:abstention_rate] }) || 0.0
+rng = Random.new(4_971_904)
+cluster_values = clusters.values
+bootstrap = if cluster_values.empty?
+              []
+            else
+              Array.new(10_000) do
+                sample = Array.new(cluster_values.length) { cluster_values[rng.rand(cluster_values.length)] }
+                mean(sample.map { |value| value[:error_rate] })
+              end
+            end
+error_upper_95 = percentile(bootstrap, 0.95) || 1.0
+
+evidence = heldout.group_by { |row| row["evidence_strength"] }.transform_values do |values|
+  supported = values.reject { |row| unavailable.call(row) }
+  {
+    "count" => values.length,
+    "error_rate" => supported.empty? ? nil : supported.count { |row| non_neutral.call(row) }.to_f / supported.length,
+    "abstention_rate" => values.empty? ? nil : values.count { |row| unavailable.call(row) }.to_f / values.length
+  }
+end
+
+subgroups = %w[body_type skin_tone clothing device environment].to_h do |field|
+  [field, heldout.group_by { |row| row[field] }.transform_values do |values|
+    supported = values.reject { |row| unavailable.call(row) }
+    {
+      "count" => values.length,
+      "false_change_rate" => supported.empty? ? nil : supported.count { |row| non_neutral.call(row) }.to_f / supported.length,
+      "abstention_rate" => values.empty? ? nil : values.count { |row| unavailable.call(row) }.to_f / values.length
+    }
+  end]
+end
+
+# Bland–Altman is intentionally limited to repeated Evolv normalized features.
+# No tape-measure field is accepted or compared here.
+feature_differences = heldout.map do |row|
+  baseline = number(row["feature_baseline"])
+  current = number(row["feature_current"])
+  current - baseline if baseline && current
+end.compact
+bias = mean(feature_differences)
+sd = sample_sd(feature_differences)
+bland_altman = {
+  "unit" => "normalized_evolv_feature",
+  "sample_size" => feature_differences.length,
+  "mean_difference" => bias,
+  "lower_95_limit" => bias && sd ? bias - 1.96 * sd : nil,
+  "upper_95_limit" => bias && sd ? bias + 1.96 * sd : nil
+}
+
+high = evidence["high"]
+lower_levels = %w[medium low].map { |level| evidence[level] }.compact
+strength_orders = high && !lower_levels.empty? && high["error_rate"] && high["abstention_rate"] &&
+  lower_levels.all? do |level|
+    level["error_rate"] && level["abstention_rate"] &&
+      high["error_rate"] < level["error_rate"] && high["abstention_rate"] < level["abstention_rate"]
+  end
+
+maximum_abstention = number(ENV.fetch("EVOLV_MAX_ABSTENTION_RATE", "0.15"))
+total_participants = rows.map { |row| row["participant_id"] }.uniq.length
+promotion_gates = {
+  "minimum_30_participants" => total_participants >= 30,
+  "heldout_participants_present" => clusters.length >= 10,
+  "false_change_upper_95_at_most_5_percent" => error_upper_95 <= 0.05,
+  "unexpected_abstention_at_most_configured_cap" => cluster_abstention_rate <= maximum_abstention,
+  "evidence_strength_orders_error_and_abstention" => !!strength_orders
+}
+
+report = {
+  "participants" => {
+    "total" => total_participants,
+    "calibration" => (participants_by_split["calibration"] || []).length,
+    "heldout" => (participants_by_split["heldout"] || []).length,
+    "split_overlap" => overlap
+  },
+  "derived_threshold_candidates" => thresholds,
+  "heldout_repeatability" => {
+    "participant_clustered_false_change_rate" => cluster_error_rate,
+    "one_sided_95_upper_bound" => error_upper_95,
+    "participant_clustered_unexpected_abstention_rate" => cluster_abstention_rate,
+    "configured_abstention_cap" => maximum_abstention
+  },
+  "evidence_strength" => evidence,
+  "subgroups" => subgroups,
+  "bland_altman_repeated_evolv_features_only" => bland_altman,
+  "promotion_gates" => promotion_gates,
+  "promote_to_validated_v1" => promotion_gates.values.all?
+}
+
+json = JSON.pretty_generate(report)
+if output
+  File.write(output, json + "\n")
+else
+  puts json
+end

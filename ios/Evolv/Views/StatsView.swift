@@ -81,7 +81,7 @@ struct StatsView: View {
     // MARK: - Filtered data
 
     private var filteredScans: [Scan] {
-        let sorted = app.scans.sorted { $0.date < $1.date }
+        let sorted = app.canonicalScans
         guard let cutoff = cutoffDate else { return sorted }
         return sorted.filter { $0.date >= cutoff }
     }
@@ -308,68 +308,40 @@ struct StatsView: View {
         GlassCard {
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
-                    Text("SCAN CONSISTENCY")
+                    Text("SCAN EVIDENCE")
                         .font(.system(size: 10, weight: .semibold, design: .rounded))
                         .tracking(1.4)
                         .foregroundStyle(EvolvTheme.textFaint)
                     Spacer()
-                    Text("\(avgConsistency)/100 avg")
+                    Text("\(filteredScans.count) scan\(filteredScans.count == 1 ? "" : "s")")
                         .font(.system(size: 11, weight: .medium, design: .rounded))
                         .foregroundStyle(EvolvTheme.textMuted)
                 }
 
-                if filteredScans.count >= 2 {
-                    Chart(filteredScans) { s in
-                        BarMark(
-                            x: .value("Date", s.date, unit: .day),
-                            y: .value("Consistency", s.consistencyScore)
-                        )
-                        .foregroundStyle(
-                            LinearGradient(
-                                colors: [EvolvTheme.accent, EvolvTheme.accent.opacity(0.4)],
-                                startPoint: .top, endPoint: .bottom
-                            )
-                        )
-                        .cornerRadius(4)
-                    }
-                    .chartYAxis {
-                        AxisMarks(position: .leading, values: [0, 50, 100]) { _ in
-                            AxisGridLine().foregroundStyle(EvolvTheme.stroke)
-                            AxisValueLabel()
-                                .font(.system(size: 10, design: .rounded))
-                                .foregroundStyle(EvolvTheme.textFaint)
-                        }
-                    }
-                    .chartXAxis {
-                        AxisMarks { _ in
-                            AxisValueLabel(format: .dateTime.day().month(.abbreviated))
-                                .font(.system(size: 10, design: .rounded))
-                                .foregroundStyle(EvolvTheme.textFaint)
-                        }
-                    }
-                    .frame(height: 140)
+                if filteredScans.isEmpty {
+                    emptyChart("Capture a scan to establish evidence").frame(height: 100)
                 } else {
-                    emptyChart("Capture more scans to track consistency").frame(height: 100)
+                    VStack(spacing: 10) {
+                        ForEach(filteredScans.suffix(5)) { scan in
+                            HStack {
+                                Text(scan.date, format: .dateTime.day().month(.abbreviated))
+                                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                                    .foregroundStyle(EvolvTheme.text)
+                                Spacer()
+                                Text(scan.analysisAvailability?.label ?? "Legacy")
+                                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                                    .foregroundStyle(scan.analysisAvailability == .comparable ? EvolvTheme.accent : EvolvTheme.textMuted)
+                            }
+                        }
+                    }
                 }
 
-                Text(consistencyNote)
+                Text("A scan is comparable only where supported upper-body evidence overlaps with an earlier scan. Unsupported regions are left unavailable. Evolv does not turn image aspect ratio into a framing score.")
                     .font(.system(size: 12.5, design: .rounded))
                     .foregroundStyle(EvolvTheme.textMuted)
                     .lineSpacing(2)
             }
         }
-    }
-
-    private var avgConsistency: Int {
-        guard !filteredScans.isEmpty else { return 0 }
-        return filteredScans.map(\.consistencyScore).reduce(0, +) / filteredScans.count
-    }
-
-    private var consistencyNote: String {
-        let a = avgConsistency
-        if a >= 78 { return "Conditions have been highly consistent. AI confidence is strong." }
-        if a >= 55 { return "Conditions vary modestly between scans. Try matching lighting and angle to sharpen the read." }
-        return "Scan conditions vary too much. Trends will remain low-confidence until consistency improves."
     }
 
     // MARK: - Progress rate card
@@ -398,20 +370,23 @@ struct StatsView: View {
     }
 
     private var weeksTracked: Int {
-        guard let first = filteredScans.first?.date, let last = filteredScans.last?.date else { return 0 }
-        return max(1, Calendar.current.dateComponents([.weekOfYear], from: first, to: last).weekOfYear ?? 0)
+        guard let first = filteredMeasurements.first?.date,
+              let last = filteredMeasurements.last?.date else { return 0 }
+        return max(0, Calendar.current.dateComponents([.weekOfYear], from: first, to: last).weekOfYear ?? 0)
     }
 
     private var rateLabel: String {
+        guard filteredMeasurements.count >= 2, weeksTracked > 0 else { return "Not enough data" }
         let v = weightChange
-        let perWeek = weeksTracked > 0 ? v / Double(weeksTracked) : 0
+        let perWeek = v / Double(weeksTracked)
         let displayPerWeek = UnitFormatter.displayMassNumber(perWeek, unit: app.profile.massUnit)
         let sign = displayPerWeek > 0 ? "+" : ""
         return "\(sign)\(String(format: "%.2f", displayPerWeek)) \(app.profile.massUnit.label)/wk"
     }
 
     private var rateDescriptor: String {
-        let perWeek = weeksTracked > 0 ? weightChange / Double(weeksTracked) : 0
+        guard filteredMeasurements.count >= 2, weeksTracked > 0 else { return "Log over time" }
+        let perWeek = weightChange / Double(weeksTracked)
         switch app.profile.goal {
         case .muscleGain: return perWeek > 0.15 ? "On pace" : (perWeek > 0 ? "Slow gain" : "Not gaining")
         case .fatLoss:    return perWeek < -0.25 ? "On pace" : (perWeek < 0 ? "Slow loss" : "Not losing")

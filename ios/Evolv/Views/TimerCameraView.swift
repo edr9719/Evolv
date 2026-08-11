@@ -2,40 +2,112 @@ import SwiftUI
 import AVFoundation
 import UIKit
 
+enum CameraOperationState: Equatable {
+    case preparing
+    case ready
+    case capturing
+    case processing
+    case completed
+    case error(String)
+}
+
+struct CameraCaptureResult {
+    let image: UIImage
+    let metadata: CaptureCameraMetadata
+}
+
+enum CameraPreferenceStore {
+    static let key = "evolv.preferredCameraPosition"
+
+    static func load(from defaults: UserDefaults = .standard) -> CaptureCameraPosition {
+        guard let rawValue = defaults.string(forKey: key),
+              let stored = CaptureCameraPosition(rawValue: rawValue) else {
+            return .front
+        }
+        return stored
+    }
+
+    static func save(
+        _ position: CaptureCameraPosition,
+        to defaults: UserDefaults = .standard
+    ) {
+        defaults.set(position.rawValue, forKey: key)
+    }
+}
+
 /// Full-screen camera with an auto-shutter countdown timer (3 / 5 / 10 s) and
 /// a manual shutter fallback. Designed for hands-free scan capture where the
 /// user props their phone against a wall, taps the timer, then walks into frame.
 struct TimerCameraView: View {
     @Environment(\.dismiss) private var dismiss
     let pose: Pose
-    let onCaptured: (UIImage) -> Void
+    let previousPhoto: UIImage?
+    let allowsCameraSwitch: Bool
+    let onCaptured: (CameraCaptureResult) -> Void
 
-    @StateObject private var camera = CameraController()
+    @StateObject private var camera: CameraController
 
     @State private var selectedSeconds: Int = 5
     @State private var countdown: Int? = nil
     @State private var isRunning: Bool = false
-    @State private var isCapturing: Bool = false
     @State private var permissionDenied: Bool = false
     @State private var flashOpacity: Double = 0
     @State private var showCaptureError: Bool = false
+    @State private var captureWatchdog: Task<Void, Never>? = nil
+    @State private var showPreviousOverlay: Bool
 
     private let timerOptions: [Int] = [3, 5, 10]
+
+    init(
+        pose: Pose,
+        previousPhoto: UIImage? = nil,
+        preferredPosition: CaptureCameraPosition? = nil,
+        allowsCameraSwitch: Bool = true,
+        onCaptured: @escaping (CameraCaptureResult) -> Void
+    ) {
+        self.pose = pose
+        self.previousPhoto = previousPhoto
+        self.allowsCameraSwitch = allowsCameraSwitch
+        self.onCaptured = onCaptured
+        _camera = StateObject(
+            wrappedValue: CameraController(
+                initialPosition: preferredPosition ?? CameraPreferenceStore.load(),
+                requiresExactPosition: !allowsCameraSwitch
+            )
+        )
+        _showPreviousOverlay = State(initialValue: previousPhoto != nil)
+    }
 
     var body: some View {
         Group {
             ZStack {
                 Color.black.ignoresSafeArea()
             
-                CameraPreviewView(session: camera.session)
+                CameraPreviewView(
+                    session: camera.session,
+                    isMirrored: camera.activePosition == .front
+                )
                     .ignoresSafeArea()
                     .opacity(camera.isReady ? 1 : 0)
-            
-                // Pose framing guide — keep faint so it doesn't dominate
-                SilhouetteHint(pose: pose)
-                    .stroke(Color.white.opacity(0.35), style: StrokeStyle(lineWidth: 1.5, dash: [6, 6]))
-                    .frame(width: 220, height: 440)
-                    .padding(.bottom, 80)
+
+                if let previousPhoto, showPreviousOverlay {
+                    Image(uiImage: previousPhoto)
+                        .resizable()
+                        .scaledToFill()
+                        .scaleEffect(x: camera.activePosition == .front ? -1 : 1, y: 1)
+                        .ignoresSafeArea()
+                        .opacity(0.22)
+                        .saturation(0.25)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+
+                // Landmark zones communicate framing without asking the user
+                // to match another person's proportions.
+                PoseAlignmentGuide(pose: pose)
+                    .padding(.horizontal, 38)
+                    .padding(.top, 88)
+                    .padding(.bottom, 208)
                     .allowsHitTesting(false)
             
                 // White flash on capture
@@ -53,24 +125,54 @@ struct TimerCameraView: View {
                         .allowsHitTesting(false)
                 }
             
-                VStack {
+            }
+            .overlay(alignment: .top) {
+                if !permissionDenied {
                     topBar
-                    Spacer()
-                    bottomControls
+                        .safeAreaPadding(.top, 8)
+                        .zIndex(20)
                 }
-            
+            }
+            .overlay(alignment: .bottom) {
+                if !permissionDenied {
+                    bottomControls
+                        .zIndex(20)
+                }
+            }
+            .overlay {
                 if permissionDenied {
                     permissionView
+                        .zIndex(30)
                 }
             }
             .statusBarHidden()
             .preferredColorScheme(.dark)
-            .onAppear { camera.start { granted in if !granted { permissionDenied = true } } }
-            .onDisappear { camera.stop(); cancelCountdown() }
+            .onAppear {
+                camera.start { ready in
+                    guard !ready else { return }
+                    let authorization = AVCaptureDevice.authorizationStatus(for: .video)
+                    if authorization == .denied || authorization == .restricted {
+                        permissionDenied = true
+                    } else {
+                        showCaptureError = true
+                    }
+                }
+            }
+            .onDisappear {
+                captureWatchdog?.cancel()
+                camera.stop()
+                cancelCountdown()
+            }
+            .onChange(of: camera.operationState) { _, state in
+                if case .error = state, !permissionDenied {
+                    showCaptureError = true
+                }
+            }
             .alert("Couldn't capture photo", isPresented: $showCaptureError) {
-                Button("Try Again", role: .cancel) {}
+                Button("Try Again") { camera.prepareForRetry() }
+                Button("Cancel", role: .cancel) { dismiss() }
             } message: {
-                Text("The camera couldn't save the photo. Tap the shutter to try again.")
+                Text(camera.errorMessage ?? "The camera couldn't finish processing the photo. Please try again.")
             }
         }
         .trackView("TimerCameraView")
@@ -79,18 +181,7 @@ struct TimerCameraView: View {
     // MARK: - Subviews
 
     private var topBar: some View {
-        HStack {
-            Button {
-                cancelCountdown()
-                dismiss()
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(12)
-                    .background(Circle().fill(.black.opacity(0.45)))
-            }
-            Spacer()
+        ZStack {
             VStack(spacing: 2) {
                 Text("POSE")
                     .font(.system(size: 10, weight: .semibold, design: .rounded))
@@ -100,23 +191,93 @@ struct TimerCameraView: View {
                     .font(.system(size: 13, weight: .medium, design: .rounded))
                     .foregroundStyle(.white)
             }
-            Spacer()
-            Button {
-                camera.switchCamera()
-            } label: {
-                Image(systemName: "arrow.triangle.2.circlepath.camera")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(12)
-                    .background(Circle().fill(.black.opacity(0.45)))
+
+            HStack {
+                Button {
+                    cancelCountdown()
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 48, height: 48)
+                        .background(Circle().fill(.black.opacity(0.66)))
+                        .overlay(Circle().stroke(.white.opacity(0.28), lineWidth: 1))
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Close camera")
+
+                Spacer()
+
+                if allowsCameraSwitch {
+                    Button {
+                        cancelCountdown()
+                        camera.switchCamera()
+                    } label: {
+                        HStack(spacing: 7) {
+                            Image(systemName: "arrow.triangle.2.circlepath.camera")
+                                .font(.system(size: 14, weight: .bold))
+                            Text("Use \(camera.activePosition.opposite.label)")
+                                .font(.system(size: 12, weight: .bold, design: .rounded))
+                        }
+                        .foregroundStyle(.white)
+                        .frame(minWidth: 104, minHeight: 48)
+                        .padding(.horizontal, 10)
+                        .background(Capsule().fill(.black.opacity(0.66)))
+                        .overlay(Capsule().stroke(.white.opacity(0.28), lineWidth: 1))
+                        .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Switch to \(camera.activePosition.opposite.label.lowercased()) camera")
+                    .accessibilityHint("The \(camera.activePosition.label.lowercased()) camera is currently active")
+                    .disabled(camera.operationState != .ready)
+                } else {
+                    Label("\(camera.activePosition.label) locked", systemImage: "lock.fill")
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .frame(minWidth: 104, minHeight: 48)
+                        .padding(.horizontal, 10)
+                        .background(Capsule().fill(.black.opacity(0.66)))
+                        .overlay(Capsule().stroke(.white.opacity(0.28), lineWidth: 1))
+                        .accessibilityLabel("\(camera.activePosition.label) camera locked for this consistency test")
+                }
             }
         }
-        .padding(.horizontal, 18)
-        .padding(.top, 8)
+        .frame(maxWidth: .infinity, minHeight: 52)
+        .padding(.horizontal, 16)
     }
 
     private var bottomControls: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 14) {
+            if previousPhoto != nil {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        showPreviousOverlay.toggle()
+                    }
+                } label: {
+                    VStack(spacing: 3) {
+                        Label(
+                            showPreviousOverlay ? "Previous photo on" : "Show previous photo",
+                            systemImage: showPreviousOverlay ? "square.stack.3d.up.fill" : "square.stack.3d.up"
+                        )
+                        .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                        Text("On-screen only · stored on this iPhone")
+                            .font(.system(size: 9.5, design: .rounded))
+                            .foregroundStyle(showPreviousOverlay ? Color.black.opacity(0.62) : Color.white.opacity(0.65))
+                    }
+                    .foregroundStyle(showPreviousOverlay ? Color.black : Color.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background {
+                        Capsule().fill(showPreviousOverlay ? Color.white.opacity(0.90) : Color.black.opacity(0.45))
+                    }
+                    .overlay(Capsule().stroke(.white.opacity(0.28), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .disabled(isCapturing)
+            }
+
             // Timer chips
             HStack(spacing: 10) {
                 ForEach(timerOptions, id: \.self) { s in
@@ -169,7 +330,7 @@ struct TimerCameraView: View {
                 Spacer()
             }
 
-            Text(isCapturing ? "Saving…" : (isRunning ? "Tap to cancel" : "Tap shutter to start a \(selectedSeconds)s timer"))
+            Text(isCapturing ? "Processing photo…" : (isRunning ? "Tap to cancel" : "Tap shutter to start a \(selectedSeconds)s timer"))
                 .font(.system(size: 12, design: .rounded))
                 .foregroundStyle(.white.opacity(0.7))
                 .animation(.easeInOut(duration: 0.2), value: isCapturing)
@@ -246,56 +407,153 @@ struct TimerCameraView: View {
     private func triggerCapture() {
         isRunning = false
         countdown = nil
-        isCapturing = true
         // Flash
         withAnimation(.easeOut(duration: 0.08)) { flashOpacity = 0.9 }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             withAnimation(.easeIn(duration: 0.25)) { flashOpacity = 0 }
         }
         UINotificationFeedbackGenerator().notificationOccurred(.success)
-        camera.capturePhoto { image in
-            isCapturing = false
-            guard let image else {
+        captureWatchdog?.cancel()
+        captureWatchdog = Task {
+            try? await Task.sleep(nanoseconds: 15_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard isCapturing else { return }
+                camera.failPendingCapture(message: "The camera took too long to process the photo.")
+                showCaptureError = true
+            }
+        }
+        camera.capturePhoto { result in
+            captureWatchdog?.cancel()
+            guard let result else {
                 showCaptureError = true
                 return
             }
-            onCaptured(image)
+            onCaptured(result)
             dismiss()
+        }
+    }
+
+    private var isCapturing: Bool {
+        camera.operationState == .capturing || camera.operationState == .processing
+    }
+}
+
+// MARK: - Landmark alignment guide
+
+private struct PoseAlignmentGuide: View {
+    let pose: Pose
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack {
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .stroke(
+                        Color.white.opacity(0.38),
+                        style: StrokeStyle(lineWidth: 1.25, dash: [7, 7])
+                    )
+
+                ForEach(zones) { zone in
+                    zoneView(zone, in: proxy.size)
+                }
+            }
+        }
+        .overlay(alignment: .top) {
+            Text(pose == .legs ? "ALIGN HIPS · KNEES · FEET" : "ALIGN HEAD · SHOULDERS · HIPS · HANDS")
+                .font(.system(size: 9, weight: .bold, design: .rounded))
+                .tracking(1.1)
+                .foregroundStyle(.white.opacity(0.88))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(.black.opacity(0.40)))
+                .offset(y: -13)
+        }
+        .accessibilityHidden(true)
+    }
+
+    private func zoneView(_ zone: AlignmentZone, in size: CGSize) -> some View {
+        let width = size.width * zone.width
+        let height = size.height * zone.height
+        return ZStack {
+            Ellipse()
+                .fill(Color.black.opacity(0.08))
+                .overlay {
+                    Ellipse()
+                        .stroke(Color.white.opacity(0.72), style: StrokeStyle(lineWidth: 1.25, dash: [5, 4]))
+                }
+                .frame(width: width, height: height)
+            Text(zone.label)
+                .font(.system(size: 7.5, weight: .bold, design: .rounded))
+                .tracking(0.7)
+                .foregroundStyle(.white.opacity(0.88))
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(.black.opacity(0.32)))
+        }
+        .position(x: size.width * zone.x, y: size.height * zone.y)
+    }
+
+    private var zones: [AlignmentZone] {
+        switch pose {
+        case .legs:
+            return [
+                AlignmentZone("HIPS", x: 0.50, y: 0.13, width: 0.46, height: 0.08),
+                AlignmentZone("KNEE", x: 0.39, y: 0.50, width: 0.15, height: 0.10),
+                AlignmentZone("KNEE", x: 0.61, y: 0.50, width: 0.15, height: 0.10),
+                AlignmentZone("FOOT", x: 0.38, y: 0.90, width: 0.20, height: 0.09),
+                AlignmentZone("FOOT", x: 0.62, y: 0.90, width: 0.20, height: 0.09)
+            ]
+        case .side, .sideChest:
+            return [
+                AlignmentZone("HEAD", x: 0.50, y: 0.13, width: 0.22, height: 0.14),
+                AlignmentZone("SHOULDER", x: 0.50, y: 0.34, width: 0.28, height: 0.08),
+                AlignmentZone("HIPS", x: 0.50, y: 0.64, width: 0.27, height: 0.08),
+                AlignmentZone("HANDS", x: pose == .sideChest ? 0.55 : 0.53, y: pose == .sideChest ? 0.52 : 0.73, width: 0.18, height: 0.11)
+            ]
+        case .frontDoubleBicep, .backDoubleBicep:
+            return [
+                AlignmentZone("HAND", x: 0.20, y: 0.17, width: 0.16, height: 0.10),
+                AlignmentZone("HEAD", x: 0.50, y: 0.19, width: 0.20, height: 0.13),
+                AlignmentZone("HAND", x: 0.80, y: 0.17, width: 0.16, height: 0.10),
+                AlignmentZone("SHOULDERS", x: 0.50, y: 0.39, width: 0.58, height: 0.07),
+                AlignmentZone("HIPS", x: 0.50, y: 0.70, width: 0.36, height: 0.08)
+            ]
+        case .mostMuscular:
+            return [
+                AlignmentZone("HEAD", x: 0.50, y: 0.16, width: 0.21, height: 0.14),
+                AlignmentZone("SHOULDERS", x: 0.50, y: 0.37, width: 0.56, height: 0.08),
+                AlignmentZone("HANDS", x: 0.50, y: 0.58, width: 0.26, height: 0.11),
+                AlignmentZone("HIPS", x: 0.50, y: 0.72, width: 0.36, height: 0.08)
+            ]
+        default:
+            return [
+                AlignmentZone("HEAD", x: 0.50, y: 0.13, width: 0.21, height: 0.14),
+                AlignmentZone("SHOULDERS", x: 0.50, y: 0.34, width: 0.55, height: 0.08),
+                AlignmentZone("HIPS", x: 0.50, y: 0.64, width: 0.38, height: 0.08),
+                AlignmentZone("HAND", x: 0.28, y: 0.73, width: 0.14, height: 0.11),
+                AlignmentZone("HAND", x: 0.72, y: 0.73, width: 0.14, height: 0.11)
+            ]
         }
     }
 }
 
-// MARK: - Silhouette hint
+private struct AlignmentZone: Identifiable {
+    let label: String
+    let x: CGFloat
+    let y: CGFloat
+    let width: CGFloat
+    let height: CGFloat
 
-private struct SilhouetteHint: Shape {
-    let pose: Pose
-    func path(in r: CGRect) -> Path {
-        var p = Path()
-        let w = r.width, h = r.height
-        let isSide = (pose == .side || pose == .sideChest)
-        let flexed = (pose == .frontDoubleBicep || pose == .backDoubleBicep || pose == .mostMuscular)
-        // Head
-        p.addEllipse(in: CGRect(x: w * 0.38, y: 0, width: w * 0.24, height: w * 0.24))
-        let neckY = w * 0.24
-        let shoulderSpread: CGFloat = isSide ? 0.16 : (flexed ? 0.56 : 0.40)
-        let waistSpread: CGFloat = isSide ? 0.14 : 0.24
-        let hipSpread: CGFloat = isSide ? 0.16 : 0.30
-        let cx = w / 2
-        let shL = cx - w * shoulderSpread / 2
-        let shR = cx + w * shoulderSpread / 2
-        let wL = cx - w * waistSpread / 2
-        let wR = cx + w * waistSpread / 2
-        let hL = cx - w * hipSpread / 2
-        let hR = cx + w * hipSpread / 2
-        p.move(to: CGPoint(x: shL, y: neckY + 4))
-        p.addQuadCurve(to: CGPoint(x: wL, y: h * 0.55), control: CGPoint(x: shL - 6, y: h * 0.35))
-        p.addQuadCurve(to: CGPoint(x: hL, y: h * 0.70), control: CGPoint(x: wL - 4, y: h * 0.62))
-        p.addLine(to: CGPoint(x: cx - w * 0.06, y: h))
-        p.addLine(to: CGPoint(x: cx + w * 0.06, y: h))
-        p.addLine(to: CGPoint(x: hR, y: h * 0.70))
-        p.addQuadCurve(to: CGPoint(x: wR, y: h * 0.55), control: CGPoint(x: wR + 4, y: h * 0.62))
-        p.addQuadCurve(to: CGPoint(x: shR, y: neckY + 4), control: CGPoint(x: shR + 6, y: h * 0.35))
-        return p
+    var id: String {
+        "\(label)-\(x)-\(y)-\(width)-\(height)"
+    }
+
+    init(_ label: String, x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat) {
+        self.label = label
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
     }
 }
 
@@ -306,76 +564,205 @@ final class CameraController: NSObject, ObservableObject, AVCapturePhotoCaptureD
     private let photoOutput = AVCapturePhotoOutput()
     private let queue = DispatchQueue(label: "evolv.camera.queue")
     private var currentInput: AVCaptureDeviceInput?
-    private var position: AVCaptureDevice.Position = .back
-    private var captureHandler: ((UIImage?) -> Void)?
+    private var configuredPosition: AVCaptureDevice.Position
+    private let requiresExactPosition: Bool
+    private var pendingCapture: PendingCapture?
+    private let handlerLock = NSLock()
 
     @Published var isReady: Bool = false
+    @Published private(set) var operationState: CameraOperationState = .preparing
+    @Published private(set) var activePosition: CaptureCameraPosition
+
+    private struct PendingCapture {
+        let handler: (CameraCaptureResult?) -> Void
+        let metadata: CaptureCameraMetadata
+    }
+
+    var errorMessage: String? {
+        guard case .error(let message) = operationState else { return nil }
+        return message
+    }
+
+    init(
+        initialPosition: CaptureCameraPosition = .front,
+        requiresExactPosition: Bool = false
+    ) {
+        activePosition = initialPosition
+        configuredPosition = Self.avPosition(for: initialPosition)
+        self.requiresExactPosition = requiresExactPosition
+        super.init()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(sessionWasInterrupted),
+            name: AVCaptureSession.wasInterruptedNotification,
+            object: session
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(sessionRuntimeError),
+            name: AVCaptureSession.runtimeErrorNotification,
+            object: session
+        )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
 
     func start(completion: @escaping (Bool) -> Void) {
+        operationState = .preparing
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
-            configure(); completion(true)
+            configure(completion: completion)
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .video) { granted in
                 DispatchQueue.main.async {
-                    if granted { self.configure() }
-                    completion(granted)
+                    if granted {
+                        self.configure(completion: completion)
+                    } else {
+                        self.operationState = .error("Camera access is required to take a photo.")
+                        completion(false)
+                    }
                 }
             }
         default:
+            operationState = .error("Camera access is turned off.")
             completion(false)
         }
     }
 
     func stop() {
+        _ = takePendingCapture()
         queue.async { [weak self] in
             guard let self else { return }
             if self.session.isRunning { self.session.stopRunning() }
+            DispatchQueue.main.async { self.isReady = false }
         }
     }
 
     func switchCamera() {
+        // Serialize reconfiguration. This also prevents a rapid double tap from
+        // removing the input while an earlier switch is still in flight.
+        guard operationState == .ready else { return }
+        DispatchQueue.main.async { self.isReady = false }
+        setState(.preparing)
         queue.async { [weak self] in
             guard let self else { return }
-            self.position = (self.position == .back) ? .front : .back
+            let previousPosition = self.configuredPosition
+            let nextPosition: AVCaptureDevice.Position = previousPosition == .back ? .front : .back
             self.session.beginConfiguration()
             if let current = self.currentInput { self.session.removeInput(current) }
-            if let input = self.makeInput(position: self.position) {
-                if self.session.canAddInput(input) {
-                    self.session.addInput(input)
-                    self.currentInput = input
+            guard let input = self.makeInput(position: nextPosition), self.session.canAddInput(input) else {
+                if let current = self.currentInput, self.session.canAddInput(current) {
+                    self.session.addInput(current)
                 }
+                self.session.commitConfiguration()
+                self.configuredPosition = previousPosition
+                DispatchQueue.main.async { self.isReady = self.session.isRunning }
+                self.setState(.error("The selected camera isn't available."))
+                return
             }
+            self.session.addInput(input)
+            self.currentInput = input
+            self.configuredPosition = nextPosition
+            self.configureUnmirroredPhotoOutput()
             self.session.commitConfiguration()
+            let publicPosition = Self.capturePosition(for: nextPosition)
+            DispatchQueue.main.async {
+                self.activePosition = publicPosition
+                self.isReady = self.session.isRunning
+                CameraPreferenceStore.save(publicPosition)
+            }
+            self.setState(.ready)
         }
     }
 
-    func capturePhoto(handler: @escaping (UIImage?) -> Void) {
-        captureHandler = handler
+    func capturePhoto(handler: @escaping (CameraCaptureResult?) -> Void) {
+        guard operationState == .ready else {
+            DispatchQueue.main.async { handler(nil) }
+            return
+        }
+        let position = activePosition
+        let lensType = queue.sync {
+            currentInput?.device.deviceType.rawValue ?? "unknown"
+        }
+        let metadata = CaptureCameraMetadata(
+            position: position,
+            lensType: lensType,
+            previewMirrored: position == .front,
+            outputMirrored: false,
+            sourceOrientation: .up,
+            normalizedOrientation: .up
+        )
+        handlerLock.lock()
+        pendingCapture = PendingCapture(handler: handler, metadata: metadata)
+        handlerLock.unlock()
+        setState(.capturing)
         let settings = AVCapturePhotoSettings()
         settings.flashMode = .off
         queue.async { [weak self] in
-            self?.photoOutput.capturePhoto(with: settings, delegate: self!)
+            guard let self else { return }
+            self.photoOutput.capturePhoto(with: settings, delegate: self)
         }
     }
 
-    private func configure() {
+    func prepareForRetry() {
+        _ = takePendingCapture()
+        if session.isRunning {
+            DispatchQueue.main.async { self.isReady = true }
+            setState(.ready)
+        } else {
+            setState(.preparing)
+        }
+    }
+
+    func failPendingCapture(message: String) {
+        let pending = takePendingCapture()
+        setState(.error(message))
+        DispatchQueue.main.async { pending?.handler(nil) }
+    }
+
+    private func configure(completion: @escaping (Bool) -> Void) {
         queue.async { [weak self] in
             guard let self else { return }
             self.session.beginConfiguration()
             self.session.sessionPreset = .photo
-            if let input = self.makeInput(position: self.position) {
-                if self.session.canAddInput(input) {
-                    self.session.addInput(input)
-                    self.currentInput = input
-                }
+            let preferredPosition = self.configuredPosition
+            let fallbackPosition: AVCaptureDevice.Position = preferredPosition == .front ? .back : .front
+            let input = self.makeInput(position: preferredPosition)
+                ?? (self.requiresExactPosition ? nil : self.makeInput(position: fallbackPosition))
+            guard let input, self.session.canAddInput(input) else {
+                self.session.commitConfiguration()
+                self.setState(.error("Evolv couldn't configure the camera."))
+                DispatchQueue.main.async { completion(false) }
+                return
             }
-            if self.session.canAddOutput(self.photoOutput) {
-                self.session.addOutput(self.photoOutput)
+            self.session.addInput(input)
+            self.currentInput = input
+            self.configuredPosition = input.device.position
+            guard self.session.canAddOutput(self.photoOutput) else {
+                self.session.removeInput(input)
+                self.session.commitConfiguration()
+                self.setState(.error("Evolv couldn't configure photo capture."))
+                DispatchQueue.main.async { completion(false) }
+                return
             }
+            self.session.addOutput(self.photoOutput)
+            self.configureUnmirroredPhotoOutput()
             self.session.commitConfiguration()
             self.session.startRunning()
-            DispatchQueue.main.async { self.isReady = true }
+            let publicPosition = Self.capturePosition(for: input.device.position)
+            DispatchQueue.main.async {
+                self.activePosition = publicPosition
+                self.isReady = self.session.isRunning
+                self.operationState = self.session.isRunning
+                    ? .ready
+                    : .error("The camera couldn't start.")
+                if self.session.isRunning {
+                    CameraPreferenceStore.save(publicPosition)
+                }
+                completion(self.session.isRunning)
+            }
         }
     }
 
@@ -389,17 +776,72 @@ final class CameraController: NSObject, ObservableObject, AVCapturePhotoCaptureD
         return try? AVCaptureDeviceInput(device: device)
     }
 
+    private func configureUnmirroredPhotoOutput() {
+        guard let connection = photoOutput.connection(with: .video),
+              connection.isVideoMirroringSupported else { return }
+        connection.automaticallyAdjustsVideoMirroring = false
+        connection.isVideoMirrored = false
+    }
+
     // MARK: AVCapturePhotoCaptureDelegate
 
+    func photoOutput(
+        _ output: AVCapturePhotoOutput,
+        willCapturePhotoFor resolvedSettings: AVCaptureResolvedPhotoSettings
+    ) {
+        setState(.processing)
+    }
+
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
-        defer { captureHandler = nil }
+        let pending = takePendingCapture()
         guard error == nil,
               let data = photo.fileDataRepresentation(),
-              let image = UIImage(data: data) else {
-            DispatchQueue.main.async { self.captureHandler?(nil) }
+              let image = UIImage(data: data),
+              let pending else {
+            setState(.error("The camera couldn't process that photo."))
+            DispatchQueue.main.async { pending?.handler(nil) }
             return
         }
-        DispatchQueue.main.async { self.captureHandler?(image) }
+        var metadata = pending.metadata
+        metadata.sourceOrientation = image.imageOrientation.captureOrientation
+        metadata.outputMirrored = metadata.sourceOrientation.isMirrored
+        setState(.completed)
+        let result = CameraCaptureResult(image: image, metadata: metadata)
+        DispatchQueue.main.async { pending.handler(result) }
+    }
+
+    private var isCapturing: Bool {
+        operationState == .capturing || operationState == .processing
+    }
+
+    private func takePendingCapture() -> PendingCapture? {
+        handlerLock.lock()
+        let capture = pendingCapture
+        pendingCapture = nil
+        handlerLock.unlock()
+        return capture
+    }
+
+    private func setState(_ state: CameraOperationState) {
+        DispatchQueue.main.async {
+            self.operationState = state
+        }
+    }
+
+    @objc private func sessionWasInterrupted(_ notification: Notification) {
+        failPendingCapture(message: "The camera was interrupted. Please try again.")
+    }
+
+    @objc private func sessionRuntimeError(_ notification: Notification) {
+        failPendingCapture(message: "The camera stopped unexpectedly. Please try again.")
+    }
+
+    private static func avPosition(for position: CaptureCameraPosition) -> AVCaptureDevice.Position {
+        position == .front ? .front : .back
+    }
+
+    private static func capturePosition(for position: AVCaptureDevice.Position) -> CaptureCameraPosition {
+        position == .front ? .front : .rear
     }
 }
 
@@ -407,16 +849,45 @@ final class CameraController: NSObject, ObservableObject, AVCapturePhotoCaptureD
 
 struct CameraPreviewView: UIViewRepresentable {
     let session: AVCaptureSession
+    let isMirrored: Bool
+
     func makeUIView(context: Context) -> PreviewView {
         let v = PreviewView()
         v.videoPreviewLayer.session = session
         v.videoPreviewLayer.videoGravity = .resizeAspectFill
+        updateMirroring(on: v.videoPreviewLayer)
         return v
     }
-    func updateUIView(_ uiView: PreviewView, context: Context) {}
+
+    func updateUIView(_ uiView: PreviewView, context: Context) {
+        updateMirroring(on: uiView.videoPreviewLayer)
+    }
+
+    private func updateMirroring(on layer: AVCaptureVideoPreviewLayer) {
+        guard let connection = layer.connection,
+              connection.isVideoMirroringSupported else { return }
+        connection.automaticallyAdjustsVideoMirroring = false
+        connection.isVideoMirrored = isMirrored
+    }
 
     final class PreviewView: UIView {
         override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
         var videoPreviewLayer: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
+    }
+}
+
+private extension UIImage.Orientation {
+    var captureOrientation: CaptureImageOrientation {
+        switch self {
+        case .up: return .up
+        case .down: return .down
+        case .left: return .left
+        case .right: return .right
+        case .upMirrored: return .upMirrored
+        case .downMirrored: return .downMirrored
+        case .leftMirrored: return .leftMirrored
+        case .rightMirrored: return .rightMirrored
+        @unknown default: return .up
+        }
     }
 }

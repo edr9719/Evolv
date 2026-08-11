@@ -1,0 +1,9 @@
+{
+  "scheme": "Evolv",
+  "version": "1.0",
+  "build": 16,
+  "bundleIdentifier": "com.app.evolv",
+  "purpose": "TestFlight validation of the five-set consistency study, results-only sharing by default, optional end-to-end encrypted photo sharing, future-only ongoing contributions, and the production pilot backend",
+  "testFlightStatus": "uploaded; Apple processing",
+  "appStoreStatus": "not submitted"
+}

@@ -1,0 +1,311 @@
+#!/bin/zsh
+set -euo pipefail
+
+SCRIPT_DIR=${0:A:h}
+REPO_ROOT=${SCRIPT_DIR:h}
+PROJECT_REF=zaqbnznrfvapbgrjxskv
+EXPECTED_BUNDLE_ID=com.app.evolv
+EXPECTED_ANALYSIS_VERSION=5
+MODE=${1:-local}
+DEVICE_ID=${EVOLV_DEVICE_UDID:-}
+
+usage() {
+  print "Usage: scripts/evolv-pilot-readiness config|local|device|live|all|deploy [--device ID]"
+  print ""
+  print "  config  Fast, read-only configuration and privacy checks"
+  print "  local   Config, iOS unit, local database, and Edge Function gates"
+  print "  device  Physical-iPhone Vision gates (requires --device)"
+  print "  live    Hosted health and disposable-invite penetration gates"
+  print "  all     Local, device, and live gates; never deploys"
+  print "  deploy  Local gates, then deploys only with explicit confirmation"
+}
+
+if [[ "$MODE" == "-h" || "$MODE" == "--help" ]]; then
+  usage
+  exit 0
+fi
+if [[ "$MODE" != "config" && "$MODE" != "local" && "$MODE" != "device" && \
+      "$MODE" != "live" && "$MODE" != "all" && "$MODE" != "deploy" ]]; then
+  usage
+  exit 64
+fi
+shift || true
+while (( $# > 0 )); do
+  case "$1" in
+    --device)
+      [[ $# -ge 2 ]] || { usage; exit 64; }
+      DEVICE_ID=$2
+      shift 2
+      ;;
+    *)
+      print -u2 "Unknown argument: $1"
+      usage
+      exit 64
+      ;;
+  esac
+done
+
+fail() {
+  print -u2 "Pilot readiness failed: $1"
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || fail "required command is unavailable: $1"
+}
+
+require_environment() {
+  [[ -n "${(P)1:-}" ]] || fail "required environment variable is unset: $1"
+}
+
+require_secret() {
+  require_environment "$1"
+  local value=${(P)1}
+  (( ${#value} >= 32 )) || fail "$1 must contain at least 32 characters"
+}
+
+load_deployment_secrets() {
+  local backend_secret_file="$REPO_ROOT/private/pilot/backend.env"
+  [[ -f "$backend_secret_file" ]] || return 0
+  [[ "$(stat -f '%Lp' "$backend_secret_file")" == "600" ]] ||
+    fail "the pilot backend secret file must have mode 600"
+  local secret_name secret_value
+  while IFS='=' read -r secret_name secret_value; do
+    case "$secret_name" in
+      PILOT_INVITE_PEPPER|PILOT_ADMIN_SECRET|PILOT_CRON_SECRET)
+        if [[ -z "${(P)secret_name:-}" ]]; then
+          typeset -gx "$secret_name=$secret_value"
+        fi
+        ;;
+      "") ;;
+      *) fail "unexpected entry in the pilot backend secret file" ;;
+    esac
+  done < "$backend_secret_file"
+}
+
+project_status() {
+  supabase projects list --output json 2>/dev/null |
+    jq -r --arg project "$PROJECT_REF" '.[] | select(.id == $project) | .status' |
+    head -n 1
+}
+
+require_active_project() {
+  local pilot_project_state
+  pilot_project_state=$(project_status)
+  [[ "$pilot_project_state" == "ACTIVE_HEALTHY" || "$pilot_project_state" == "ACTIVE" ]] ||
+    fail "Supabase project $PROJECT_REF is ${pilot_project_state:-unavailable}; restore it before live rollout"
+}
+
+run_config_gates() {
+  require_command rg
+  require_command jq
+  require_command git
+  require_command ruby
+  require_command zsh
+
+  local configured_ref bundle_id project_build pbx_builds
+  configured_ref=$(rg -o 'https://[a-z]+\.supabase\.co' "$REPO_ROOT/ios/project.yml" |
+    head -n 1 | sed -E 's#https://([a-z]+)\.supabase\.co#\1#')
+  [[ "$configured_ref" == "$PROJECT_REF" ]] ||
+    fail "iOS Supabase project does not match the pilot project"
+
+  bundle_id=$(awk '/PRODUCT_BUNDLE_IDENTIFIER:/ { print $2; exit }' "$REPO_ROOT/ios/project.yml")
+  [[ "$bundle_id" == "$EXPECTED_BUNDLE_ID" ]] ||
+    fail "unexpected app bundle identifier: ${bundle_id:-missing}"
+
+  project_build=$(awk -F': ' '/CURRENT_PROJECT_VERSION:/ { gsub(/"/, "", $2); print $2; exit }' "$REPO_ROOT/ios/project.yml")
+  [[ "$project_build" == <-> ]] || fail "project build number is invalid"
+  pbx_builds=$(rg 'CURRENT_PROJECT_VERSION = ' "$REPO_ROOT/ios/Evolv.xcodeproj/project.pbxproj" |
+    sed -E 's/.*= ([0-9]+);/\1/' | sort -u)
+  [[ "$pbx_builds" == "$project_build" ]] ||
+    fail "project.yml and Xcode project build numbers differ"
+
+  rg -q "static let currentAnalysisVersion = $EXPECTED_ANALYSIS_VERSION|analysisVersion: $EXPECTED_ANALYSIS_VERSION|analysisVersion = $EXPECTED_ANALYSIS_VERSION" \
+    "$REPO_ROOT/ios/Evolv" || fail "analysis version $EXPECTED_ANALYSIS_VERSION is not configured"
+  if [[ -f "$REPO_ROOT/private/pilot/public-key.txt" ]]; then
+    local bundled_pilot_key researcher_pilot_key
+    bundled_pilot_key=$(rg -o 'keyAgreementPublicKeyBase64 = "[A-Za-z0-9+/=]+"' \
+      "$REPO_ROOT/ios/Evolv/Models/PilotStudyModels.swift" | awk -F'"' '{ print $2 }')
+    researcher_pilot_key=$(tr -d '\r\n' < "$REPO_ROOT/private/pilot/public-key.txt")
+    [[ -n "$bundled_pilot_key" && "$bundled_pilot_key" == "$researcher_pilot_key" ]] ||
+      fail "bundled pilot encryption key does not match the researcher keypair"
+  fi
+  git -C "$REPO_ROOT" diff --check
+  EVOLV_PILOT_TEST_INVITE= "$SCRIPT_DIR/test-evolv-pilot-security"
+  print "Configuration, version, and privacy gates passed for build $project_build."
+}
+
+run_local_gates() {
+  require_command supabase
+  require_command npx
+  require_command xcodebuild
+  require_command curl
+  require_command docker
+
+  run_config_gates
+  npx --yes deno fmt --check "$REPO_ROOT/supabase/functions"
+  npx --yes deno check \
+    "$REPO_ROOT/supabase/functions/pilot-api/index.ts" \
+    "$REPO_ROOT/supabase/functions/pilot-admin/index.ts" \
+    "$REPO_ROOT/supabase/functions/pilot-retention/index.ts"
+  ruby -c "$SCRIPT_DIR/evolv-pilot" >/dev/null
+  ruby -c "$SCRIPT_DIR/evolv-validation-stats" >/dev/null
+  zsh -n "$SCRIPT_DIR/test-evolv-analysis" "$SCRIPT_DIR/test-evolv-pilot-security"
+
+  local started_here=0
+  if ! supabase status --workdir "$REPO_ROOT" >/dev/null 2>&1; then
+    # The function is exercised directly below. Excluding Supabase's bundled
+    # Edge Runtime avoids making this gate depend on its unrelated bootstrap
+    # registry while preserving the real local database and REST API.
+    supabase start --exclude edge-runtime --workdir "$REPO_ROOT"
+    started_here=1
+  fi
+  local cleanup_local=false
+  local function_pid=""
+  if (( started_here == 1 )); then cleanup_local=true; fi
+  trap '
+    if [[ -n "$function_pid" ]]; then
+      kill "$function_pid" >/dev/null 2>&1 || true
+      wait "$function_pid" >/dev/null 2>&1 || true
+    fi
+    if [[ "$cleanup_local" == true ]]; then
+      supabase stop --workdir "$REPO_ROOT" >/dev/null 2>&1 || true
+    fi
+  ' EXIT INT TERM
+  supabase db reset --local --workdir "$REPO_ROOT"
+  supabase test db --local --workdir "$REPO_ROOT"
+  supabase db lint --local --schema public --level error --fail-on error --workdir "$REPO_ROOT"
+
+  local function_log="$REPO_ROOT/ios/build/analysis-validation/pilot-local-function.log"
+  mkdir -p "${function_log:h}"
+  local local_status
+  local_status=$(supabase status --output json --workdir "$REPO_ROOT" 2>/dev/null)
+  local local_pilot_pepper='local-readiness-pepper-not-for-production-2026'
+  local local_pilot_invite='EVOLVLOCALREADINESS2026'
+  SUPABASE_URL=$(print -r -- "$local_status" | jq -r '.API_URL') \
+  SUPABASE_SERVICE_ROLE_KEY=$(print -r -- "$local_status" | jq -r '.SERVICE_ROLE_KEY') \
+  PILOT_INVITE_PEPPER="$local_pilot_pepper" \
+    npx --yes deno run --allow-env --allow-net \
+      "$REPO_ROOT/supabase/functions/pilot-api/index.ts" > "$function_log" 2>&1 &
+  function_pid=$!
+  local health_ok=false
+  for _attempt in {1..30}; do
+    if curl --fail --silent --request POST \
+      --header 'Content-Type: application/json' --data '{}' \
+      'http://127.0.0.1:8000/pilot-api/health' |
+      jq -e '.status == "ok" and .schemaVersion == 2 and .analysisVersion == 5' >/dev/null 2>&1; then
+      health_ok=true
+      break
+    fi
+    sleep 1
+  done
+  [[ "$health_ok" == true ]] || fail "local pilot health contract failed; see $function_log"
+
+  local local_invite_hash
+  local_invite_hash=$(PILOT_INVITE_PEPPER="$local_pilot_pepper" \
+    ruby -ropenssl -e 'print OpenSSL::HMAC.hexdigest("SHA256", ENV.fetch("PILOT_INVITE_PEPPER"), "invite:EVOLVLOCALREADINESS2026")')
+  docker exec supabase_db_evolv psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+    -c "insert into public.pilot_studies (id, name, closes_at, max_participants) values ('90000000-0000-4000-8000-000000000001', 'Local readiness test', now() + interval '1 day', 1); insert into public.pilot_invites (study_id, invite_hash, expires_at) values ('90000000-0000-4000-8000-000000000001', '$local_invite_hash', now() + interval '1 day');" \
+    >/dev/null
+  EVOLV_PILOT_TEST_INVITE="$local_pilot_invite" \
+  EVOLV_PILOT_API_URL='http://127.0.0.1:8000/pilot-api' \
+  SUPABASE_PUBLISHABLE_KEY=$(print -r -- "$local_status" | jq -r '.PUBLISHABLE_KEY') \
+    "$SCRIPT_DIR/test-evolv-pilot-security"
+
+  kill "$function_pid" >/dev/null 2>&1 || true
+  wait "$function_pid" >/dev/null 2>&1 || true
+  function_pid=""
+
+  "$SCRIPT_DIR/test-evolv-analysis" unit
+  if [[ "$cleanup_local" == true ]]; then
+    supabase stop --workdir "$REPO_ROOT" >/dev/null
+    cleanup_local=false
+  fi
+  trap - EXIT INT TERM
+  print "Local database, Edge Function, privacy, and iOS unit gates passed."
+}
+
+run_device_gates() {
+  [[ -n "$DEVICE_ID" ]] || fail "device mode requires --device ID"
+  "$SCRIPT_DIR/test-evolv-analysis" device --device "$DEVICE_ID"
+  print "Physical-device Vision gates passed."
+}
+
+run_live_gates() {
+  require_command curl
+  require_active_project
+  require_environment SUPABASE_PUBLISHABLE_KEY
+  require_environment EVOLV_PILOT_TEST_INVITE
+  local configured_key
+  configured_key=$(awk -F"'" '/INFOPLIST_KEY_SUPABASE_PUBLISHABLE_KEY:/ { print $2; exit }' "$REPO_ROOT/ios/project.yml")
+  [[ "$SUPABASE_PUBLISHABLE_KEY" == "$configured_key" ]] ||
+    fail "SUPABASE_PUBLISHABLE_KEY does not match the release app configuration"
+  local normalized_invite=${EVOLV_PILOT_TEST_INVITE//[^A-Za-z0-9]/}
+  (( ${#normalized_invite} >= 16 )) || fail "EVOLV_PILOT_TEST_INVITE is not a valid disposable invite"
+  EVOLV_PILOT_API_URL="https://$PROJECT_REF.supabase.co/functions/v1/pilot-api" \
+    "$SCRIPT_DIR/test-evolv-pilot-security"
+  print "Hosted health and disposable-invite penetration gates passed."
+}
+
+deploy_backend() {
+  require_active_project
+  [[ "${EVOLV_PILOT_DEPLOY_CONFIRM:-}" == "$PROJECT_REF" ]] ||
+    fail "set EVOLV_PILOT_DEPLOY_CONFIRM=$PROJECT_REF to authorize this deployment"
+  load_deployment_secrets
+  require_secret PILOT_INVITE_PEPPER
+  require_secret PILOT_ADMIN_SECRET
+  require_secret PILOT_CRON_SECRET
+  [[ -f "$REPO_ROOT/private/pilot/evolv-pilot-private.pem" &&
+     -f "$REPO_ROOT/private/pilot/public-key.txt" ]] ||
+    fail "the ignored pilot researcher keypair is required before enabling photo sharing"
+  [[ "$(stat -f '%Lp' "$REPO_ROOT/private/pilot/evolv-pilot-private.pem")" == "600" ]] ||
+    fail "the pilot researcher private key must have mode 600"
+
+  local secret_file
+  secret_file=$(mktemp)
+  chmod 600 "$secret_file"
+  trap '[[ -n "${secret_file:-}" && -f "$secret_file" ]] && rm -f -- "$secret_file"' EXIT INT TERM
+  {
+    print -r -- "PILOT_INVITE_PEPPER=$PILOT_INVITE_PEPPER"
+    print -r -- "PILOT_ADMIN_SECRET=$PILOT_ADMIN_SECRET"
+    print -r -- "PILOT_CRON_SECRET=$PILOT_CRON_SECRET"
+  } > "$secret_file"
+
+  supabase link --project-ref "$PROJECT_REF" --workdir "$REPO_ROOT"
+  supabase db push --linked --include-all --yes --workdir "$REPO_ROOT"
+  supabase db lint --linked --schema public --level error --fail-on error --workdir "$REPO_ROOT"
+  supabase secrets set --project-ref "$PROJECT_REF" --env-file "$secret_file" --workdir "$REPO_ROOT"
+  supabase functions deploy pilot-api pilot-admin pilot-retention \
+    --project-ref "$PROJECT_REF" --use-api --workdir "$REPO_ROOT"
+
+  rm -f -- "$secret_file"
+  secret_file=""
+  trap - EXIT INT TERM
+  print "Pilot backend deployed. Run the live gate with a disposable invite before TestFlight distribution."
+}
+
+case "$MODE" in
+  config)
+    run_config_gates
+    ;;
+  local)
+    run_local_gates
+    ;;
+  device)
+    run_config_gates
+    run_device_gates
+    ;;
+  live)
+    run_config_gates
+    run_live_gates
+    ;;
+  all)
+    run_local_gates
+    run_device_gates
+    run_live_gates
+    ;;
+  deploy)
+    run_local_gates
+    deploy_backend
+    ;;
+esac
