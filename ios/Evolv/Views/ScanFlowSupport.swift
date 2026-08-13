@@ -129,8 +129,8 @@ struct ScanStartOptionsSheet: View {
             return "It was captured at \(scan.date.formatted(date: .omitted, time: .shortened)). Same-day differences often come from lighting, hydration, posture, or workout pump—not physique progress."
         }
         let names = naturalPoseList(scan.recommendedRepairPoses)
-        let noun = scan.recommendedRepairPoses.count == 1 ? "photo is" : "photos are"
-        return "The \(names) \(noun) saved, but Evolv could not verify the framing automatically. Retaking \(scan.recommendedRepairPoses.count == 1 ? "it" : "them") may make this scan usable for future comparisons. This does not mean the saved photo\(scan.recommendedRepairPoses.count == 1 ? " is" : "s are") poor."
+        let noun = scan.recommendedRepairPoses.count == 1 ? "photo has" : "photos have"
+        return "The \(names) \(noun) a specific extreme-lighting warning. The photos are saved; retake only if your body outline is genuinely obscured. Detector uncertainty by itself never requires a retake."
     }
 
     private func naturalPoseList(_ poses: [Pose]) -> String {
@@ -165,7 +165,7 @@ struct ScanRepairPickerSheet: View {
             ZStack {
                 AmbientBackground()
                 VStack(spacing: 16) {
-                    Text("These photos are already saved. Choose only the angles you want Evolv to try verifying again; every unselected photo will remain unchanged.")
+                    Text("These photos are already saved. Choose only the angles you want to replace; every unselected photo will remain unchanged. An uncertain pose check alone does not mean a photo needs retaking.")
                         .font(.system(size: 13.5, design: .rounded))
                         .foregroundStyle(EvolvTheme.textMuted)
                         .multilineTextAlignment(.center)
@@ -189,7 +189,7 @@ struct ScanRepairPickerSheet: View {
                                             Text(pose.label)
                                                 .font(.system(size: 15, weight: .semibold, design: .rounded))
                                                 .foregroundStyle(EvolvTheme.text)
-                                            Text(capture?.assessment?.automaticStatusTitle ?? "Automatic check unavailable")
+                                            Text(capture?.assessment?.automaticStatusTitle ?? "Could not verify automatically")
                                                 .font(.system(size: 12, design: .rounded))
                                                 .foregroundStyle(EvolvTheme.textMuted)
                                         }

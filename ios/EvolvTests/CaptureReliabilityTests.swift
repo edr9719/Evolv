@@ -93,6 +93,7 @@ final class CaptureReliabilityTests: XCTestCase {
         XCTAssertNil(scan.captures[0].captureSource)
         XCTAssertNil(scan.captures[0].normalizedPixelSize)
         XCTAssertNil(scan.captures[0].cameraMetadata)
+        XCTAssertNil(scan.captureRecipeID)
     }
 
     func testAssessmentOverrideRoundTripsWithCapture() throws {
@@ -150,6 +151,96 @@ final class CaptureReliabilityTests: XCTestCase {
         XCTAssertFalse(frontWide.isComparable(with: frontDifferentLens))
     }
 
+    func testCameraConfigurationAlsoRequiresMatchingOrientationAndKnownZoom() {
+        let reference = cameraMetadata(position: .front, lensType: "wide", zoomFactor: 1)
+        var changed = reference
+        changed.zoomFactor = 1.05
+        XCTAssertFalse(reference.isComparable(with: changed))
+
+        changed = reference
+        changed.normalizedOrientation = .right
+        XCTAssertFalse(reference.isComparable(with: changed))
+
+        // A missing zoom belongs to a legacy build. Per-photo analysis can
+        // still use its other evidence gates, while a new recipe is stricter.
+        changed = reference
+        changed.zoomFactor = nil
+        XCTAssertTrue(reference.isComparable(with: changed))
+        let recipe = CaptureRecipe(
+            cameraPosition: reference.position,
+            lensType: reference.lensType,
+            zoomFactor: reference.zoomFactor,
+            normalizedOrientation: reference.normalizedOrientation
+        )
+        XCTAssertFalse(recipe.isCompatible(with: changed))
+    }
+
+    func testCaptureRecipeRequiresThreeInAppPhotosFromOneCameraSetup() throws {
+        let metadata = cameraMetadata(position: .front, lensType: "wide", zoomFactor: 1)
+        var captures = Pose.required.map { cameraCapture($0, metadata: metadata) }
+
+        let recipe = try XCTUnwrap(CaptureRecipe.derive(from: captures))
+        XCTAssertEqual(recipe.cameraPosition, .front)
+        XCTAssertEqual(recipe.lensType, "wide")
+        XCTAssertEqual(recipe.zoomFactor, 1)
+
+        captures[1].cameraMetadata = cameraMetadata(position: .rear, lensType: "wide", zoomFactor: 1)
+        XCTAssertNil(CaptureRecipe.derive(from: captures))
+
+        captures = Pose.required.map { cameraCapture($0, metadata: metadata) }
+        captures[2].captureSource = .photoLibrary
+        XCTAssertNil(CaptureRecipe.derive(from: captures))
+    }
+
+    func testPreviousPhotoGhostRequiresTheActiveCameraRecipe() {
+        let reference = cameraMetadata(position: .front, lensType: "wide", zoomFactor: 1)
+
+        XCTAssertTrue(CameraReferencePolicy.canDisplay(
+            reference: reference,
+            activePosition: .front,
+            activeLensType: "wide",
+            activeZoomFactor: 1
+        ))
+        XCTAssertFalse(CameraReferencePolicy.canDisplay(
+            reference: reference,
+            activePosition: .rear,
+            activeLensType: "wide",
+            activeZoomFactor: 1
+        ))
+        XCTAssertFalse(CameraReferencePolicy.canDisplay(
+            reference: reference,
+            activePosition: .front,
+            activeLensType: "wide",
+            activeZoomFactor: 1.05
+        ))
+    }
+
+    func testUncertainPoseCheckDoesNotCreateAnEndlessRepairLoop() {
+        var captures = Pose.required.map { pose in
+            PoseCapture(
+                pose: pose,
+                imageFilename: "\(pose.rawValue).jpg",
+                avgBrightness: 0.5,
+                aspectRatio: 0.75,
+                captureSource: .camera,
+                assessment: QualityGateEngine.unavailableAssessment(reason: "body_landmarks_not_verified")
+            )
+        }
+        var scan = Scan(
+            date: Date(),
+            captures: captures,
+            consistencyScore: 0,
+            lightingScore: 0,
+            framingScore: 0
+        )
+        XCTAssertTrue(scan.recommendedRepairPoses.isEmpty)
+
+        captures[0].assessment?.status = .reviewRecommended
+        captures[0].assessment?.confirmedIssues = [.tooDark]
+        scan.captures = captures
+        XCTAssertEqual(scan.recommendedRepairPoses, [.front])
+    }
+
     func testAllThreeStandardPosesAreRequired() {
         let front = capture(.front)
         let side = capture(.side)
@@ -183,7 +274,8 @@ final class CaptureReliabilityTests: XCTestCase {
 
     private func cameraMetadata(
         position: CaptureCameraPosition,
-        lensType: String
+        lensType: String,
+        zoomFactor: Float? = nil
     ) -> CaptureCameraMetadata {
         CaptureCameraMetadata(
             position: position,
@@ -191,7 +283,22 @@ final class CaptureReliabilityTests: XCTestCase {
             previewMirrored: position == .front,
             outputMirrored: false,
             sourceOrientation: .up,
-            normalizedOrientation: .up
+            normalizedOrientation: .up,
+            zoomFactor: zoomFactor
+        )
+    }
+
+    private func cameraCapture(
+        _ pose: Pose,
+        metadata: CaptureCameraMetadata
+    ) -> PoseCapture {
+        PoseCapture(
+            pose: pose,
+            imageFilename: "\(pose.rawValue).jpg",
+            avgBrightness: 0.5,
+            aspectRatio: 0.75,
+            captureSource: .camera,
+            cameraMetadata: metadata
         )
     }
 

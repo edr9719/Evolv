@@ -91,7 +91,15 @@ enum SignalInterpreter {
 
         let goalAlignments = Dictionary(uniqueKeysWithValues: signals.map { key, signal in
             let region = BodyRegion(rawValue: key)
-            return (key, alignment(signal: signal, region: region, goal: goal))
+            guard let region else { return (key, GoalAlignment.notApplicable) }
+            let status: RegionalComparisonStatus
+            switch signal {
+            case .strongPositive, .moderatePositive, .minimalPositive: status = .increase
+            case .neutral: status = .stable
+            case .minimalNegative, .moderateNegative, .strongNegative: status = .decrease
+            case .unclear: status = .unavailable
+            }
+            return (key, GoalAlignmentPolicy.alignment(status: status, region: region, goal: goal))
         })
 
         return InterpretedSignals(
@@ -131,39 +139,6 @@ enum SignalInterpreter {
             return isPositive ? .minimalPositive : .minimalNegative
         } else {
             return .neutral
-        }
-    }
-
-    private static func alignment(
-        signal: DirectionalSignal,
-        region: BodyRegion?,
-        goal: FitnessGoal
-    ) -> GoalAlignment {
-        guard let region, signal != .unclear else { return .notApplicable }
-        if signal == .neutral { return .neutral }
-        let increased = signal == .minimalPositive
-            || signal == .moderatePositive
-            || signal == .strongPositive
-
-        switch goal {
-        case .maintain:
-            return .unfavorable
-        case .fatLoss:
-            return region == .waist ? (increased ? .unfavorable : .favorable) : .notApplicable
-        case .muscleGain:
-            switch region {
-            case .shoulders, .chest, .arms, .thighs:
-                return increased ? .favorable : .unfavorable
-            case .waist:
-                return .notApplicable
-            }
-        case .recomp:
-            switch region {
-            case .waist:
-                return increased ? .unfavorable : .favorable
-            case .shoulders, .chest, .arms, .thighs:
-                return increased ? .favorable : .unfavorable
-            }
         }
     }
 

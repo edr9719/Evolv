@@ -1,0 +1,40 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "csv"
+require "digest"
+require "json"
+require "time"
+
+manifest_path, lock_path = ARGV
+abort "Usage: scripts/evolv-lock-validation-split PARTICIPANTS.csv SPLIT_LOCK.json" unless
+  manifest_path && File.file?(manifest_path) && lock_path
+abort "Refusing to overwrite an existing split lock: #{lock_path}" if File.exist?(lock_path)
+
+table = CSV.read(manifest_path, headers: true)
+required = %w[pseudonymous_subject split scan_count]
+missing = required - (table.headers || [])
+abort "Participant manifest is missing columns: #{missing.join(', ')}" unless missing.empty?
+rows = table.map(&:to_h)
+abort "Pre-release split lock requires at least 30 participants" if rows.length < 30
+abort "Participant IDs must be unique" unless rows.map { |row| row["pseudonymous_subject"] }.uniq.length == rows.length
+abort "Every participant must be assigned before locking" unless rows.all? do |row|
+  %w[calibration heldout].include?(row["split"])
+end
+
+counts = rows.group_by { |row| row["split"] }.transform_values(&:length)
+abort "The locked split requires at least 10 calibration and 10 held-out participants" unless
+  counts.fetch("calibration", 0) >= 10 && counts.fetch("heldout", 0) >= 10
+
+assignments = rows.map { |row| [row["pseudonymous_subject"], row["split"]] }.sort
+report = {
+  "schema_version" => 1,
+  "participant_assignment_sha256" => Digest::SHA256.hexdigest(JSON.generate(assignments)),
+  "locked_at" => Time.now.utc.iso8601,
+  "participant_count" => rows.length,
+  "calibration_count" => counts.fetch("calibration", 0),
+  "heldout_count" => counts.fetch("heldout", 0),
+  "contains_participant_identifiers" => false
+}
+File.write(lock_path, JSON.pretty_generate(report) + "\n", mode: "wx")
+puts "Validation split locked without copying participant identifiers: #{lock_path}"

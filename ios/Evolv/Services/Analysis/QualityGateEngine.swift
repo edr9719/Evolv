@@ -60,15 +60,12 @@ enum QualityGateEngine {
         let confidences = evidence.values.map { $0.state == .supported ? Float(1) : Float(0) }
         let coverage = confidences.isEmpty ? 0 : confidences.reduce(0, +) / Float(confidences.count)
 
-        let torsoVerified: Bool
-        if expectedPose.category == .standard {
-            torsoVerified = evidence[.chest]?.state == .supported
+        // This only verifies that the landmarks needed by the pose-specific
+        // extractor are visible. It does not grade bodybuilding form.
+        let poseLandmarksVerified: Bool = expectedPose == .legs
+            ? evidence[.lowerBody]?.state == .supported
+            : evidence[.chest]?.state == .supported
                 && evidence[.waist]?.state == .supported
-        } else {
-            // Showcase photos are stored for visual comparison only. Do not
-            // pretend the current analyzer validates their bodybuilding form.
-            torsoVerified = true
-        }
 
         let status: CaptureVerificationStatus
         let automaticCheckReason: String?
@@ -77,12 +74,18 @@ enum QualityGateEngine {
             automaticCheckReason = confirmedIssues.contains(.tooDark)
                 ? "confirmed_extreme_darkness"
                 : "confirmed_extreme_overexposure"
-        } else if torsoVerified {
+        } else if poseLandmarksVerified {
             status = .ready
             automaticCheckReason = nil
         } else {
             status = .unavailable
-            automaticCheckReason = "required_torso_landmarks_not_verified"
+            if expectedPose == .legs {
+                automaticCheckReason = "lower_body_landmarks_not_verified"
+            } else if expectedPose == .side || expectedPose == .sideChest {
+                automaticCheckReason = "side_torso_landmarks_not_verified"
+            } else {
+                automaticCheckReason = "required_torso_landmarks_not_verified"
+            }
         }
 
         return CaptureAssessment(
@@ -154,35 +157,56 @@ enum QualityGateEngine {
         expectedPose: Pose
     ) -> [CaptureRegion: RegionEvidence] {
         let minimumConfidence: VNConfidence = 0.35
+        // Vision's 2D joint confidence is predictably lower when the far-side
+        // shoulder and hip overlap the near side. Use a conservative, lower
+        // threshold for one complete *same-side* chain instead of requiring
+        // independently selected points that may belong to opposite sides.
+        let sideMinimumConfidence: VNConfidence = 0.20
 
-        func available(_ joint: VNHumanBodyPoseObservation.JointName) -> Bool {
+        func available(
+            _ joint: VNHumanBodyPoseObservation.JointName,
+            minimum: VNConfidence
+        ) -> Bool {
             guard let point = try? observation.recognizedPoint(joint) else { return false }
             let inset: CGFloat = 0.02
-            return point.confidence >= minimumConfidence
+            return point.confidence >= minimum
                 && point.location.x >= inset && point.location.x <= 1 - inset
                 && point.location.y >= inset && point.location.y <= 1 - inset
         }
 
-        func all(_ joints: [VNHumanBodyPoseObservation.JointName]) -> Bool {
-            joints.allSatisfy(available)
+        func all(
+            _ joints: [VNHumanBodyPoseObservation.JointName],
+            minimum: VNConfidence
+        ) -> Bool {
+            joints.allSatisfy { available($0, minimum: minimum) }
         }
 
         func oneSideChain() -> Bool {
-            all([.leftShoulder, .leftElbow, .leftWrist])
-                || all([.rightShoulder, .rightElbow, .rightWrist])
+            all([.leftShoulder, .leftElbow, .leftWrist], minimum: sideMinimumConfidence)
+                || all([.rightShoulder, .rightElbow, .rightWrist], minimum: sideMinimumConfidence)
         }
 
         let isSide = expectedPose == .side || expectedPose == .sideChest
+        let leftSideTorso = all([.leftShoulder, .leftHip], minimum: sideMinimumConfidence)
+        let rightSideTorso = all([.rightShoulder, .rightHip], minimum: sideMinimumConfidence)
+        let sideTorso = leftSideTorso || rightSideTorso
         let shoulders = isSide
-            ? (available(.leftShoulder) || available(.rightShoulder))
-            : all([.leftShoulder, .rightShoulder])
+            ? sideTorso
+            : all([.leftShoulder, .rightShoulder], minimum: minimumConfidence)
         let hips = isSide
-            ? (available(.leftHip) || available(.rightHip))
-            : all([.leftHip, .rightHip])
+            ? sideTorso
+            : all([.leftHip, .rightHip], minimum: minimumConfidence)
         let arms = isSide
             ? oneSideChain()
-            : all([.leftShoulder, .leftElbow, .leftWrist, .rightShoulder, .rightElbow, .rightWrist])
+            : all(
+                [.leftShoulder, .leftElbow, .leftWrist, .rightShoulder, .rightElbow, .rightWrist],
+                minimum: minimumConfidence
+            )
         let torso = shoulders && hips
+        let lowerBody = all(
+            [.leftHip, .leftKnee, .leftAnkle, .rightHip, .rightKnee, .rightAnkle],
+            minimum: 0.25
+        )
 
         func value(_ supported: Bool, _ reason: String) -> RegionEvidence {
             supported ? .supported : .unavailable(reason)
@@ -193,7 +217,8 @@ enum QualityGateEngine {
             .chest: value(torso, "upper_torso_not_verified"),
             .waist: value(torso, "waist_not_verified"),
             .arms: value(arms, "full_arms_not_verified"),
-            .sideTorso: value(isSide && torso, isSide ? "side_torso_not_verified" : "not_applicable")
+            .sideTorso: value(isSide && sideTorso, isSide ? "side_torso_not_verified" : "not_applicable"),
+            .lowerBody: value(expectedPose == .legs && lowerBody, expectedPose == .legs ? "lower_body_not_verified" : "not_applicable")
         ]
     }
 

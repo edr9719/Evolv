@@ -31,6 +31,11 @@ struct StatsView: View {
             
                             measurementsCard
                                 .padding(.horizontal, 20)
+
+                            if app.activeCanonicalScans.count >= 2 {
+                                longitudinalPatternCard
+                                    .padding(.horizontal, 20)
+                            }
             
                             consistencyCard
                                 .padding(.horizontal, 20)
@@ -81,7 +86,7 @@ struct StatsView: View {
     // MARK: - Filtered data
 
     private var filteredScans: [Scan] {
-        let sorted = app.canonicalScans
+        let sorted = app.activeCanonicalScans
         guard let cutoff = cutoffDate else { return sorted }
         return sorted.filter { $0.date >= cutoff }
     }
@@ -90,6 +95,10 @@ struct StatsView: View {
         let sorted = app.measurements.sorted { $0.date < $1.date }
         guard let cutoff = cutoffDate else { return sorted }
         return sorted.filter { $0.date >= cutoff }
+    }
+
+    private var filteredWeightMeasurements: [Measurement] {
+        filteredMeasurements.filter { $0.weightKg != nil }
     }
 
     private var cutoffDate: Date? {
@@ -111,17 +120,20 @@ struct StatsView: View {
         }
     }
 
-    private var weightChange: Double {
-        guard let first = filteredMeasurements.first, let last = filteredMeasurements.last else { return 0 }
-        return last.weightKg - first.weightKg
+    private var weightChange: Double? {
+        guard let first = filteredWeightMeasurements.first?.weightKg,
+              let last = filteredWeightMeasurements.last?.weightKg,
+              filteredWeightMeasurements.count >= 2 else { return nil }
+        return last - first
     }
 
     private var weightChangeString: String {
-        UnitFormatter.signedMass(weightChange, unit: app.profile.massUnit)
+        guard let weightChange else { return "—" }
+        return UnitFormatter.signedMass(weightChange, unit: app.profile.massUnit)
     }
 
     private var weightChangeColor: Color {
-        let v = weightChange
+        guard let v = weightChange else { return EvolvTheme.textMuted }
         switch app.profile.goal {
         case .muscleGain: return v > 0 ? EvolvTheme.improving : (v < 0 ? EvolvTheme.stalled : EvolvTheme.textMuted)
         case .fatLoss:    return v < 0 ? EvolvTheme.improving : (v > 0 ? EvolvTheme.stalled : EvolvTheme.textMuted)
@@ -163,9 +175,10 @@ struct StatsView: View {
                             .font(.system(size: 10, weight: .semibold, design: .rounded))
                             .tracking(1.4)
                             .foregroundStyle(EvolvTheme.textFaint)
-                        if let latest = filteredMeasurements.last {
+                        if let latest = filteredWeightMeasurements.last,
+                           let weight = latest.weightKg {
                             HStack(alignment: .firstTextBaseline, spacing: 4) {
-                                Text(String(format: "%.1f", UnitFormatter.displayMassNumber(latest.weightKg, unit: app.profile.massUnit)))
+                                Text(String(format: "%.1f", UnitFormatter.displayMassNumber(weight, unit: app.profile.massUnit)))
                                     .font(.system(size: 28, weight: .semibold, design: .rounded))
                                     .foregroundStyle(EvolvTheme.text)
                                     .monospacedDigit()
@@ -184,34 +197,36 @@ struct StatsView: View {
                         .background(Capsule().fill(weightChangeColor.opacity(0.14)))
                 }
 
-                if filteredMeasurements.count >= 2 {
-                    Chart(filteredMeasurements) { m in
-                        LineMark(
-                            x: .value("Date", m.date),
-                            y: .value("Weight", m.weightKg)
-                        )
-                        .foregroundStyle(EvolvTheme.accent)
-                        .interpolationMethod(.monotone)
-                        .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round))
-
-                        AreaMark(
-                            x: .value("Date", m.date),
-                            y: .value("Weight", m.weightKg)
-                        )
-                        .foregroundStyle(
-                            LinearGradient(
-                                colors: [EvolvTheme.accent.opacity(0.28), EvolvTheme.accent.opacity(0)],
-                                startPoint: .top, endPoint: .bottom
+                if filteredWeightMeasurements.count >= 2 {
+                    Chart(filteredWeightMeasurements) { m in
+                        if let weight = m.weightKg {
+                            LineMark(
+                                x: .value("Date", m.date),
+                                y: .value("Weight", weight)
                             )
-                        )
-                        .interpolationMethod(.monotone)
+                            .foregroundStyle(EvolvTheme.accent)
+                            .interpolationMethod(.monotone)
+                            .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round))
 
-                        PointMark(
-                            x: .value("Date", m.date),
-                            y: .value("Weight", m.weightKg)
-                        )
-                        .foregroundStyle(EvolvTheme.accent)
-                        .symbolSize(36)
+                            AreaMark(
+                                x: .value("Date", m.date),
+                                y: .value("Weight", weight)
+                            )
+                            .foregroundStyle(
+                                LinearGradient(
+                                    colors: [EvolvTheme.accent.opacity(0.28), EvolvTheme.accent.opacity(0)],
+                                    startPoint: .top, endPoint: .bottom
+                                )
+                            )
+                            .interpolationMethod(.monotone)
+
+                            PointMark(
+                                x: .value("Date", m.date),
+                                y: .value("Weight", weight)
+                            )
+                            .foregroundStyle(EvolvTheme.accent)
+                            .symbolSize(36)
+                        }
                     }
                     .chartYAxis {
                         AxisMarks(position: .leading) { _ in
@@ -302,6 +317,100 @@ struct StatsView: View {
         }
     }
 
+    // MARK: - Longitudinal visual patterns
+
+    private var longitudinalPatternCard: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Text("LONGITUDINAL VISUAL PATTERNS")
+                        .font(.system(size: 10, weight: .semibold, design: .rounded))
+                        .tracking(1.4)
+                        .foregroundStyle(EvolvTheme.textFaint)
+                    Spacer()
+                    Text("Baseline referenced")
+                        .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                        .foregroundStyle(EvolvTheme.accent)
+                }
+
+                if let summary = app.longitudinalVisualSummary {
+                    let narrative = LongitudinalVisualEngine.narrative(for: summary)
+                    Text(narrative?.headline ?? "More comparable scans are needed")
+                        .font(.system(size: 16, weight: .semibold, design: .rounded))
+                        .foregroundStyle(EvolvTheme.text)
+                    Text(narrative?.detail ?? "No repeated pattern is available.")
+                        .font(.system(size: 12, design: .rounded))
+                        .foregroundStyle(EvolvTheme.textMuted)
+                        .lineSpacing(2)
+
+                    Divider().overlay(EvolvTheme.stroke)
+                    ForEach(summary.relaxedFindings) { finding in
+                        longitudinalRow(finding)
+                    }
+
+                    let optional = summary.optionalFindings.filter { $0.supportedObservationCount > 0 }
+                    if !optional.isEmpty {
+                        Divider().overlay(EvolvTheme.stroke)
+                        Text("OPTIONAL POSES · SAME POSE ONLY")
+                            .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                            .tracking(1.1)
+                            .foregroundStyle(EvolvTheme.textFaint)
+                        ForEach(optional) { finding in
+                            longitudinalRow(finding)
+                        }
+                    }
+
+                    Text(narrative?.caveat ?? "Missing evidence is never treated as stability.")
+                        .font(.system(size: 10.5, design: .rounded))
+                        .foregroundStyle(EvolvTheme.textFaint)
+                        .lineSpacing(2)
+                } else {
+                    emptyChart("Two current, comparable scans are required")
+                        .frame(height: 90)
+                }
+            }
+        }
+    }
+
+    private func longitudinalRow(_ finding: LongitudinalVisualFinding) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Circle()
+                .fill(longitudinalColor(finding.status))
+                .frame(width: 7, height: 7)
+                .padding(.top, 5)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(finding.region.visualLabel(for: finding.pose))
+                    .font(.system(size: 12.5, weight: .medium, design: .rounded))
+                    .foregroundStyle(EvolvTheme.text)
+                if let pose = finding.pose {
+                    Text(pose.label)
+                        .font(.system(size: 10.5, design: .rounded))
+                        .foregroundStyle(EvolvTheme.textFaint)
+                }
+            }
+            Spacer(minLength: 8)
+            VStack(alignment: .trailing, spacing: 3) {
+                Text(finding.status.label)
+                    .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                    .foregroundStyle(longitudinalColor(finding.status))
+                Text("\(finding.supportedObservationCount) supported")
+                    .font(.system(size: 9.5, design: .rounded))
+                    .foregroundStyle(EvolvTheme.textFaint)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private func longitudinalColor(_ status: LongitudinalPatternStatus) -> Color {
+        switch status {
+        case .repeatedStable: return EvolvTheme.accent
+        case .emergingIncrease, .emergingDecrease: return EvolvTheme.stable
+        case .repeatedIncrease, .repeatedDecrease: return EvolvTheme.text
+        case .mixed: return EvolvTheme.stalled
+        case .insufficientEvidence: return EvolvTheme.textMuted
+        }
+    }
+
     // MARK: - Consistency card
 
     private var consistencyCard: some View {
@@ -349,7 +458,7 @@ struct StatsView: View {
     private var progressRateCard: some View {
         GlassCard {
             VStack(alignment: .leading, spacing: 12) {
-                Text("ESTIMATED PROGRESS RATE")
+                Text("LOGGED WEIGHT TREND")
                     .font(.system(size: 10, weight: .semibold, design: .rounded))
                     .tracking(1.4)
                     .foregroundStyle(EvolvTheme.textFaint)
@@ -361,7 +470,7 @@ struct StatsView: View {
                         .font(.system(size: 12, weight: .medium, design: .rounded))
                         .foregroundStyle(EvolvTheme.accent)
                 }
-                Text("Based on \(filteredScans.count) scans and \(filteredMeasurements.count) measurements over \(weeksTracked) week\(weeksTracked == 1 ? "" : "s"). We never invent progress — if data is thin, we say so.")
+                Text("Calculated only from \(filteredWeightMeasurements.count) logged weights over \(weeksTracked) week\(weeksTracked == 1 ? "" : "s"). A weight trend alone does not establish muscle gain, fat loss, or visual progress.")
                     .font(.system(size: 12.5, design: .rounded))
                     .foregroundStyle(EvolvTheme.textMuted)
                     .lineSpacing(2)
@@ -370,14 +479,14 @@ struct StatsView: View {
     }
 
     private var weeksTracked: Int {
-        guard let first = filteredMeasurements.first?.date,
-              let last = filteredMeasurements.last?.date else { return 0 }
+        guard let first = filteredWeightMeasurements.first?.date,
+              let last = filteredWeightMeasurements.last?.date else { return 0 }
         return max(0, Calendar.current.dateComponents([.weekOfYear], from: first, to: last).weekOfYear ?? 0)
     }
 
     private var rateLabel: String {
-        guard filteredMeasurements.count >= 2, weeksTracked > 0 else { return "Not enough data" }
-        let v = weightChange
+        guard filteredWeightMeasurements.count >= 2, weeksTracked > 0,
+              let v = weightChange else { return "Not enough data" }
         let perWeek = v / Double(weeksTracked)
         let displayPerWeek = UnitFormatter.displayMassNumber(perWeek, unit: app.profile.massUnit)
         let sign = displayPerWeek > 0 ? "+" : ""
@@ -385,13 +494,11 @@ struct StatsView: View {
     }
 
     private var rateDescriptor: String {
-        guard filteredMeasurements.count >= 2, weeksTracked > 0 else { return "Log over time" }
+        guard filteredWeightMeasurements.count >= 2, weeksTracked > 0,
+              let weightChange else { return "Log over time" }
         let perWeek = weightChange / Double(weeksTracked)
-        switch app.profile.goal {
-        case .muscleGain: return perWeek > 0.15 ? "On pace" : (perWeek > 0 ? "Slow gain" : "Not gaining")
-        case .fatLoss:    return perWeek < -0.25 ? "On pace" : (perWeek < 0 ? "Slow loss" : "Not losing")
-        case .recomp, .maintain: return abs(perWeek) < 0.15 ? "On pace" : "Drifting"
-        }
+        if abs(perWeek) < 0.05 { return "Stable scale weight" }
+        return perWeek > 0 ? "Scale weight rising" : "Scale weight falling"
     }
 
     private func emptyChart(_ text: String) -> some View {

@@ -131,10 +131,12 @@ private struct ConsistencyEducationView: View {
     let onContinue: () -> Void
 
     private let rules: [(String, String, String)] = [
-        ("location.fill", "Same location", "Pick one spot. A door frame, a hallway, a corner — return to it every scan."),
-        ("sun.max.fill", "Same lighting", "Daylight or a fixed lamp. Avoid shadows that change across scans."),
-        ("ruler", "Same distance", "Phone at chest height. Same step count back. The silhouette guide will help."),
-        ("figure.stand", "Same poses", "Front, side, back, relaxed. Optional flex poses are saved for showcase only.")
+        ("camera.aperture", "Same camera and lens", "Choose front or rear for your baseline and keep it. Do not zoom. Changing the camera or lens starts a new comparison baseline."),
+        ("iphone", "Mark the phone spot", "Keep the phone upright at the same height and angle. Mark the support or tripod position with tape."),
+        ("figure.walk", "Mark your feet", "Mark where your feet go and which direction you face for front, side, and back."),
+        ("sun.max.fill", "Same lighting", "Use the same room and light direction. Avoid a strong shadow across your body."),
+        ("wind", "Same relaxed body state", "Stand naturally, let your arms hang, and take the photo after a normal exhale. Match your timing relative to workouts and meals."),
+        ("tshirt", "Same visible outline", "Use similar fitted clothing and coverage each time so fabric does not create a false shape change.")
     ]
 
     var body: some View {

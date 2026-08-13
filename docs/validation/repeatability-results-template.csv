@@ -1,1 +1,1 @@
-participant_id,split,comparison_id,region,expected_condition,result_status,evidence_strength,feature_baseline,feature_current,pose_match,pose_spread,body_type,skin_tone,clothing,device,environment
+participant_id,split,comparison_id,region,expected_condition,result_status,evidence_strength,feature_baseline,feature_current,pose_match,pose_spread,threshold_set_identifier,body_type,skin_tone,clothing,device,environment

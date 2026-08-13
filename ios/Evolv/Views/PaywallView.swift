@@ -28,9 +28,9 @@ struct PaywallView: View {
                 ambient
 
                 ScrollView {
-                    VStack(spacing: 32) {
+                    VStack(spacing: 26) {
                         hero
-                            .padding(.top, context == .postOnboarding ? 72 : 52)
+                            .padding(.top, context == .postOnboarding ? 28 : 20)
                             .padding(.horizontal, 24)
 
                         featureList
@@ -41,11 +41,24 @@ struct PaywallView: View {
 
                         ctaSection
                             .padding(.horizontal, 24)
-                            .padding(.bottom, 48)
+                            .padding(.bottom, 40)
                     }
+                    .frame(maxWidth: .infinity)
                 }
                 .scrollIndicators(.hidden)
                 .contentMargins(.bottom, 8, for: .scrollContent)
+
+                // Top scrim — fades scrolled content out before it reaches the status bar
+                VStack(spacing: 0) {
+                    LinearGradient(
+                        colors: [EvolvTheme.background, EvolvTheme.background.opacity(0)],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                    .frame(height: 64)
+                    Spacer()
+                }
+                .allowsHitTesting(false)
+                .ignoresSafeArea(edges: .top)
 
                 // Top chrome
                 VStack {
@@ -106,24 +119,12 @@ struct PaywallView: View {
     }
 
     private var hero: some View {
-        VStack(spacing: 22) {
-            ZStack {
-                Circle()
-                    .stroke(EvolvTheme.accent.opacity(0.25), lineWidth: 1)
-                    .frame(width: 120, height: 120)
-                Circle()
-                    .stroke(EvolvTheme.accent.opacity(0.5), lineWidth: 1)
-                    .frame(width: 84, height: 84)
-                Image(systemName: "sparkles")
-                    .font(.system(size: 32, weight: .light))
-                    .foregroundStyle(EvolvTheme.accent)
-            }
-
-            HStack(spacing: 8) {
+        VStack(spacing: 18) {
+            HStack(spacing: 10) {
                 Image("evolv-logo")
                     .resizable()
                     .scaledToFit()
-                    .frame(height: 80)
+                    .frame(height: 68)
                 Text("PREMIUM")
                     .font(.system(size: 11, weight: .semibold, design: .rounded))
                     .tracking(2.0)
@@ -131,7 +132,7 @@ struct PaywallView: View {
             }
 
             Text("See your real\ntransformation.")
-                .font(.system(size: 32, weight: .semibold, design: .rounded))
+                .font(.system(size: 30, weight: .semibold, design: .rounded))
                 .multilineTextAlignment(.center)
                 .foregroundStyle(EvolvTheme.text)
                 .lineSpacing(2)
@@ -146,11 +147,11 @@ struct PaywallView: View {
     }
 
     private var featureList: some View {
-        GlassCard(padding: 22, cornerRadius: 22) {
+        GlassCard(padding: 20, cornerRadius: 22) {
             VStack(spacing: 0) {
                 featureRow("rectangle.on.rectangle.angled", "Honest transformation timeline", "Side-by-side comparisons that reveal real visual change over weeks and months.")
                 Divider().overlay(EvolvTheme.stroke)
-                featureRow("sparkles", "AI-powered progress insight", "Region-by-region reads with confidence levels — never invented gains.")
+                featureRow("sparkles", "Evidence-based progress insight", "Region-by-region visual reads with evidence strength — unsupported regions stay unavailable.")
                 Divider().overlay(EvolvTheme.stroke)
                 featureRow("calendar", "Consistency guidance", "Quiet reminders and capture cues that keep your trend trustworthy.")
                 Divider().overlay(EvolvTheme.stroke)
@@ -180,16 +181,16 @@ struct PaywallView: View {
             }
             Spacer()
         }
-        .padding(.vertical, 12)
+        .padding(.vertical, 11)
     }
 
     private var plansSection: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 12) {
             Text("Both plans start with a \(PurchaseService.trialDays)-day free trial.")
                 .font(.system(size: 12, weight: .medium, design: .rounded))
                 .foregroundStyle(EvolvTheme.accent)
                 .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.bottom, 6)
+                .padding(.bottom, 4)
 
             ForEach(PurchaseService.Plan.allCases) { plan in
                 PlanCard(plan: plan, selected: selectedPlan == plan) {
@@ -217,6 +218,7 @@ struct PaywallView: View {
                             RoundedRectangle(cornerRadius: 18, style: .continuous)
                                 .stroke(selectedPlan == nil ? EvolvTheme.stroke : .clear, lineWidth: 1)
                         }
+                        .frame(maxWidth: .infinity)
                         .frame(height: 56)
                     if isLoading {
                         ProgressView()
@@ -225,12 +227,15 @@ struct PaywallView: View {
                         HStack(spacing: 8) {
                             Text(ctaTitle)
                                 .font(.system(size: 16, weight: .semibold, design: .rounded))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
                             if selectedPlan != nil {
                                 Image(systemName: "arrow.right")
                                     .font(.system(size: 14, weight: .semibold))
                             }
                         }
                         .foregroundStyle(selectedPlan == nil ? EvolvTheme.textMuted : EvolvTheme.background)
+                        .padding(.horizontal, 20)
                     }
                 }
             }
@@ -342,6 +347,8 @@ private struct PlanCard: View {
                         Text(plan.title)
                             .font(.system(size: 16, weight: .semibold, design: .rounded))
                             .foregroundStyle(EvolvTheme.text)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
                         if let badge = plan.savingsBadge {
                             Text(badge)
                                 .font(.system(size: 9, weight: .bold, design: .rounded))
@@ -350,22 +357,30 @@ private struct PlanCard: View {
                                 .padding(.horizontal, 7)
                                 .padding(.vertical, 3)
                                 .background(Capsule().fill(EvolvTheme.accent))
+                                .layoutPriority(1)
                         }
                     }
                     Text(subtitle)
                         .font(.system(size: 12, design: .rounded))
                         .foregroundStyle(EvolvTheme.textMuted)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
                 }
-                Spacer()
+                Spacer(minLength: 8)
                 VStack(alignment: .trailing, spacing: 3) {
                     Text(plan.price)
                         .font(.system(size: 18, weight: .semibold, design: .rounded))
                         .foregroundStyle(EvolvTheme.text)
                         .monospacedDigit()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
                     Text(plan.perLabel)
                         .font(.system(size: 10, design: .rounded))
                         .foregroundStyle(EvolvTheme.textFaint)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
                 }
+                .layoutPriority(1)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 18)

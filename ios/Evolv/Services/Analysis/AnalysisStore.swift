@@ -4,10 +4,10 @@ import Foundation
 /// Analysis data is local-only; photos are never sent to any network.
 enum AnalysisStore {
 
-    /// Version 5 adds camera-configuration comparability. Legacy analyses are
-    /// re-run without losing scans or photos; unknown legacy camera metadata is
-    /// treated conservatively rather than rejected.
-    static let currentAnalysisVersion = 5
+    /// Version 7 keeps each current baseline-relative observation literal and
+    /// moves repetition decisions into an explicit longitudinal engine. Legacy
+    /// analyses are re-run without changing or deleting any scan or photo.
+    static let currentAnalysisVersion = 7
 
     // MARK: - Directory
 

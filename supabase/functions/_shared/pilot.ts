@@ -4,6 +4,8 @@ export const PHOTO_BUCKET = "pilot-photo-ciphertext";
 export const MAX_PAYLOAD_BYTES = 524_288;
 export const MAX_OBJECT_BYTES = 5_242_880;
 export const MAX_OBJECTS = 15;
+export const CURRENT_ANALYSIS_VERSION = 7;
+export const MINIMUM_SUPPORTED_ANALYSIS_VERSION = 4;
 
 export function serviceClient(): SupabaseClient {
   const url = Deno.env.get("SUPABASE_URL");
@@ -150,6 +152,17 @@ export function validateResultsPayload(
   const root = results as Record<string, unknown>;
   if (root.schema_version !== 1 || typeof root.local_session_id !== "string") {
     throw new Error("invalid_results");
+  }
+  if (
+    typeof root.analysis_version !== "number" ||
+    !Number.isInteger(root.analysis_version) ||
+    Number(root.analysis_version) < MINIMUM_SUPPORTED_ANALYSIS_VERSION ||
+    Number(root.analysis_version) > CURRENT_ANALYSIS_VERSION ||
+    typeof root.threshold_set_identifier !== "string" ||
+    root.threshold_set_identifier.length < 1 ||
+    root.threshold_set_identifier.length > 80
+  ) {
+    throw new Error("unsupported_analysis_version");
   }
   const contributionType = String(root.contribution_type || "consistency_test");
   if (contributionType === "consistency_test") {

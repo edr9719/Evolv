@@ -82,6 +82,13 @@ enum SilhouetteAnalyzer {
     // Keep requiring observed landmarks, but use a separately tested floor for
     // the visible shoulder-to-hip chain instead of rejecting valid side poses.
     private static let minimumSideLandmarkConfidence: Float = 0.20
+    // Shorts and the upper-body crop boundary make hip joints less certain in
+    // otherwise clear legs photos. Accept one moderately uncertain hip only
+    // when both complete distal chains exist, the average hip evidence clears
+    // a stronger floor, and the knee lies plausibly between hip and ankle.
+    private static let minimumLegHipConfidence: Float = 0.18
+    private static let minimumAverageLegHipConfidence: Float = 0.23
+    private static let minimumLegDistalConfidence: Float = 0.25
 
     static func analyze(image: UIImage, extractedPose: ExtractedPose) async throws -> SilhouetteProfile {
         try await analyzeWithDebug(image: image, extractedPose: extractedPose).profile
@@ -105,6 +112,9 @@ enum SilhouetteAnalyzer {
 
     /// Internal fixture seam used by physical-device and synthetic-mask tests.
     static func analyze(mask: BinaryPersonMask, extractedPose: ExtractedPose) throws -> SilhouetteProfile {
+        if extractedPose.pose == .legs {
+            return try analyzeLegs(mask: mask, extractedPose: extractedPose)
+        }
         let coordinates = try coordinateSystem(mask: mask, pose: extractedPose)
         let torsoLimit = max(4, Int((coordinates.torsoLength * 0.9).rounded()))
 
@@ -129,11 +139,11 @@ enum SilhouetteAnalyzer {
         }
 
         var features: [PoseRegionFeature] = []
-        if extractedPose.pose == .front || extractedPose.pose == .back,
+        if supportsShoulderFeature(extractedPose.pose),
            let shoulders = torsoFeature(.shoulders, fraction: 0.08) {
             features.append(shoulders)
         }
-        if extractedPose.pose == .front || extractedPose.pose == .side,
+        if supportsChestFeature(extractedPose.pose),
            let chest = torsoFeature(.chest, fraction: 0.45) {
             features.append(chest)
         }
@@ -172,11 +182,136 @@ enum SilhouetteAnalyzer {
         )
     }
 
+    /// Legs use a lower-body reference because the requested crop deliberately
+    /// excludes shoulders. Thickness is sampled perpendicular to each
+    /// hip-to-knee axis and normalized by hip-to-ankle length.
+    private static func analyzeLegs(
+        mask: BinaryPersonMask,
+        extractedPose: ExtractedPose
+    ) throws -> SilhouetteProfile {
+        func point(_ joint: String, minimumConfidence: Float) -> AnalysisPoint? {
+            imagePoint(
+                extractedPose.landmark(joint),
+                mask: mask,
+                minimumConfidence: minimumConfidence
+            )
+        }
+        guard let leftHipLandmark = extractedPose.landmark("leftHip"),
+              let rightHipLandmark = extractedPose.landmark("rightHip"),
+              leftHipLandmark.confidence >= minimumLegHipConfidence,
+              rightHipLandmark.confidence >= minimumLegHipConfidence,
+              (leftHipLandmark.confidence + rightHipLandmark.confidence) / 2 >= minimumAverageLegHipConfidence,
+              let leftHip = point("leftHip", minimumConfidence: minimumLegHipConfidence),
+              let leftKnee = point("leftKnee", minimumConfidence: minimumLegDistalConfidence),
+              let leftAnkle = point("leftAnkle", minimumConfidence: minimumLegDistalConfidence),
+              let rightHip = point("rightHip", minimumConfidence: minimumLegHipConfidence),
+              let rightKnee = point("rightKnee", minimumConfidence: minimumLegDistalConfidence),
+              let rightAnkle = point("rightAnkle", minimumConfidence: minimumLegDistalConfidence) else {
+            throw AnalysisError.insufficientLandmarks
+        }
+
+        func isPlausibleLegChain(hip: AnalysisPoint, knee: AnalysisPoint, ankle: AnalysisPoint) -> Bool {
+            let full = ankle - hip
+            guard full.length >= 20 else { return false }
+            let along = knee - hip
+            let progress = (along.x * full.normalized.x + along.y * full.normalized.y) / full.length
+            let lateral = abs(along.x * full.normalized.y - along.y * full.normalized.x) / full.length
+            return progress >= 0.25 && progress <= 0.75 && lateral <= 0.30
+        }
+        typealias LegChain = (hip: AnalysisPoint, knee: AnalysisPoint, ankle: AnalysisPoint)
+        let direct: [LegChain] = [
+            (leftHip, leftKnee, leftAnkle),
+            (rightHip, rightKnee, rightAnkle)
+        ]
+        let hipSwapped: [LegChain] = [
+            (rightHip, leftKnee, leftAnkle),
+            (leftHip, rightKnee, rightAnkle)
+        ]
+        func pairingCost(_ chains: [LegChain]) -> Float {
+            chains.reduce(0) { total, chain in
+                let distal = chain.ankle - chain.knee
+                guard distal.length >= 8 else { return .greatestFiniteMagnitude }
+                let hipOffset = chain.hip - chain.knee
+                let lateral = abs(
+                    hipOffset.x * distal.normalized.y -
+                    hipOffset.y * distal.normalized.x
+                )
+                return total + lateral / max((chain.ankle - chain.hip).length, 1)
+            }
+        }
+        // Vision can swap left/right hip labels while keeping each knee/ankle
+        // chain internally consistent. Choose the one-to-one hip assignment
+        // closest to those observed distal axes; never manufacture a point.
+        let chains = pairingCost(hipSwapped) < pairingCost(direct) ? hipSwapped : direct
+        guard chains.allSatisfy({ chain in
+            isPlausibleLegChain(hip: chain.hip, knee: chain.knee, ankle: chain.ankle)
+        }) else {
+            throw AnalysisError.insufficientLandmarks
+        }
+
+        let referenceLengths = chains.map { ($0.ankle - $0.hip).length }
+            .filter { $0 >= 20 }
+        guard referenceLengths.count == 2 else { throw AnalysisError.invalidReferenceScale }
+        let reference = median(referenceLengths)
+
+        func thighThickness(hip: AnalysisPoint, knee: AnalysisPoint) -> Float? {
+            let segment = knee - hip
+            guard segment.length >= 10 else { return nil }
+            let perpendicular = AnalysisPoint(x: -segment.normalized.y, y: segment.normalized.x)
+            let maximum = max(3, Int((reference * 0.20).rounded()))
+            // Avoid the proximal hip/shorts area, where the two thighs often
+            // form one contiguous mask segment. Mid-distal samples preserve
+            // isolated, same-leg evidence without treating the pelvis or the
+            // opposite thigh as leg thickness.
+            let samples = [Float(0.60), 0.70, 0.80].compactMap { fraction in
+                contiguousThickness(
+                    mask: mask,
+                    center: hip + segment * fraction,
+                    axis: perpendicular,
+                    maximumDistance: maximum
+                )
+            }
+            guard samples.count >= 2 else { return nil }
+            return median(samples) / reference
+        }
+
+        guard let first = thighThickness(hip: chains[0].hip, knee: chains[0].knee),
+              let second = thighThickness(hip: chains[1].hip, knee: chains[1].knee) else {
+            throw AnalysisError.insufficientEvidence
+        }
+        let feature = PoseRegionFeature(
+            pose: .legs,
+            region: .thighs,
+            normalizedValue: median([first, second]),
+            source: .limbCrossSection,
+            evidenceReason: nil
+        )
+        return SilhouetteProfile(
+            scanId: extractedPose.scanId,
+            pose: .legs,
+            widthAtY: horizontalDebugProfile(mask),
+            shoulderWidthRatio: 0,
+            chestWidthRatio: 0,
+            waistWidthRatio: 0,
+            armMidWidthRatio: 0,
+            thighMidWidthRatio: feature.normalizedValue,
+            taperIndex: 0,
+            chestToWaistRatio: 1,
+            shoulderToWaistRatio: 1,
+            hipWidthRatio: nil,
+            lowerTorsoWidthRatio: 0,
+            supportedRegions: [.thighs],
+            regionFeatures: [feature],
+            torsoReferencePixels: reference,
+            poseMatchScore: extractedPose.poseMatchScore
+        )
+    }
+
     // MARK: - Coordinate system
 
     private static func coordinateSystem(mask: BinaryPersonMask, pose: ExtractedPose) throws -> PersonCoordinateSystem {
         func point(_ joint: String) -> AnalysisPoint? {
-            let confidenceFloor = pose.pose == .side
+            let confidenceFloor = isSideView(pose.pose)
                 ? minimumSideLandmarkConfidence
                 : minimumLandmarkConfidence
             guard let landmark = pose.landmark(joint), landmark.confidence >= confidenceFloor,
@@ -190,7 +325,7 @@ enum SilhouetteAnalyzer {
 
         let shoulderCenter: AnalysisPoint
         let hipCenter: AnalysisPoint
-        if pose.pose == .side {
+        if isSideView(pose.pose) {
             let candidates = [
                 ("leftShoulder", "leftHip", "leftElbow", "leftWrist"),
                 ("rightShoulder", "rightHip", "rightElbow", "rightWrist")
@@ -254,7 +389,7 @@ enum SilhouetteAnalyzer {
             torso: coordinates
         )
         let values: [Float]
-        if pose.pose == .side {
+        if isSideView(pose.pose) {
             values = [left, right].compactMap { $0 }
             guard !values.isEmpty else { return nil }
         } else {
@@ -278,9 +413,12 @@ enum SilhouetteAnalyzer {
         wrist: String,
         torso: PersonCoordinateSystem
     ) -> Float? {
-        guard let s = imagePoint(pose.landmark(shoulder), mask: mask),
-              let e = imagePoint(pose.landmark(elbow), mask: mask),
-              let w = imagePoint(pose.landmark(wrist), mask: mask),
+        let confidenceFloor = isSideView(pose.pose)
+            ? minimumSideLandmarkConfidence
+            : minimumLandmarkConfidence
+        guard let s = imagePoint(pose.landmark(shoulder), mask: mask, minimumConfidence: confidenceFloor),
+              let e = imagePoint(pose.landmark(elbow), mask: mask, minimumConfidence: confidenceFloor),
+              let w = imagePoint(pose.landmark(wrist), mask: mask, minimumConfidence: confidenceFloor),
               (w - e).length >= 8 else { return nil }
         let segment = e - s
         guard segment.length >= 8 else { return nil }
@@ -417,8 +555,12 @@ enum SilhouetteAnalyzer {
         mask.isForeground(x: Int(point.x.rounded()), y: Int(point.y.rounded()))
     }
 
-    private static func imagePoint(_ landmark: NormalizedLandmark?, mask: BinaryPersonMask) -> AnalysisPoint? {
-        guard let landmark, landmark.confidence >= minimumLandmarkConfidence,
+    private static func imagePoint(
+        _ landmark: NormalizedLandmark?,
+        mask: BinaryPersonMask,
+        minimumConfidence: Float = minimumLandmarkConfidence
+    ) -> AnalysisPoint? {
+        guard let landmark, landmark.confidence >= minimumConfidence,
               landmark.x >= 0.02, landmark.x <= 0.98,
               landmark.y >= 0.02, landmark.y <= 0.98 else { return nil }
         return AnalysisPoint(
@@ -480,6 +622,28 @@ enum SilhouetteAnalyzer {
             return (sorted[sorted.count / 2 - 1] + sorted[sorted.count / 2]) / 2
         }
         return sorted[sorted.count / 2]
+    }
+
+    private static func isSideView(_ pose: Pose) -> Bool {
+        pose == .side || pose == .sideChest
+    }
+
+    private static func supportsShoulderFeature(_ pose: Pose) -> Bool {
+        switch pose {
+        case .front, .back, .frontDoubleBicep, .backDoubleBicep, .mostMuscular:
+            return true
+        case .side, .sideChest, .relaxedAesthetic, .legs:
+            return false
+        }
+    }
+
+    private static func supportsChestFeature(_ pose: Pose) -> Bool {
+        switch pose {
+        case .front, .side, .frontDoubleBicep, .sideChest, .mostMuscular, .relaxedAesthetic:
+            return true
+        case .back, .backDoubleBicep, .legs:
+            return false
+        }
     }
 
     enum AnalysisError: Error {

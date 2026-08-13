@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "repeatability_input_sha256": "replace-with-the-SHA-256-from-the-generated-report",
+  "reviewer_identifier": "replace-with-a-pseudonymous-reviewer-id",
+  "reviewed_at": "2026-08-12T00:00:00Z",
+  "material_disparity_found": false,
+  "notes": "Describe the subgroup cells reviewed, sparse cells, disparities considered, and the decision."
+}

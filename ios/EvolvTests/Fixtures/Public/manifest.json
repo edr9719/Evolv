@@ -1,18 +1,29 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "consentClassification": "public_generated",
   "fixtures": [
     {"id":"generated-01-front","asset":"pose-reference-front-relaxed","pose":"front","expectedCondition":"valid_mandatory"},
     {"id":"generated-02-side","asset":"pose-reference-side-relaxed","pose":"side","expectedCondition":"valid_mandatory"},
     {"id":"generated-03-back","asset":"pose-reference-back-relaxed","pose":"back","expectedCondition":"valid_mandatory"},
-    {"id":"generated-04-front-db","asset":"pose-reference-front-double-biceps","pose":"frontDoubleBicep","expectedCondition":"showcase_only"},
-    {"id":"generated-05-side-chest","asset":"pose-reference-side-chest","pose":"sideChest","expectedCondition":"showcase_only"},
-    {"id":"generated-06-back-db","asset":"pose-reference-back-double-biceps","pose":"backDoubleBicep","expectedCondition":"showcase_only"},
-    {"id":"generated-07-most-muscular","asset":"pose-reference-most-muscular","pose":"mostMuscular","expectedCondition":"showcase_only"},
-    {"id":"generated-08-relaxed-aesthetic","asset":"pose-reference-relaxed-aesthetic","pose":"relaxedAesthetic","expectedCondition":"showcase_only"},
-    {"id":"generated-09-legs","asset":"pose-reference-legs","pose":"legs","expectedCondition":"showcase_only"}
+    {"id":"generated-04-front-db","asset":"pose-reference-front-double-biceps","pose":"frontDoubleBicep","expectedCondition":"valid_optional"},
+    {"id":"generated-05-side-chest","asset":"pose-reference-side-chest","pose":"sideChest","expectedCondition":"valid_optional"},
+    {"id":"generated-06-back-db","asset":"pose-reference-back-double-biceps","pose":"backDoubleBicep","expectedCondition":"valid_optional"},
+    {"id":"generated-07-most-muscular","asset":"pose-reference-most-muscular","pose":"mostMuscular","expectedCondition":"valid_optional"},
+    {"id":"generated-08-relaxed-aesthetic","asset":"pose-reference-relaxed-aesthetic","pose":"relaxedAesthetic","expectedCondition":"valid_optional"},
+    {"id":"generated-09-legs","asset":"pose-reference-legs","pose":"legs","expectedCondition":"valid_optional"}
   ],
   "expectedAnalyticalRegions": ["shoulders", "chest", "waist"],
+  "expectedRegionsByPose": {
+    "front": ["shoulders", "chest", "waist"],
+    "side": ["chest", "waist"],
+    "back": ["shoulders", "waist"],
+    "frontDoubleBicep": ["chest", "waist", "arms"],
+    "sideChest": ["chest", "waist"],
+    "backDoubleBicep": ["waist", "arms"],
+    "mostMuscular": ["shoulders", "chest", "waist"],
+    "relaxedAesthetic": ["chest", "waist"],
+    "legs": ["thighs"]
+  },
   "deterministicTransformations": [
     "orientation_metadata", "jpeg_0_72", "brightness_minus_0_08",
     "contrast_plus_0_08", "translation_2_percent", "rotation_minus_2_degrees",

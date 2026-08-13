@@ -322,13 +322,20 @@ final class PilotSharingTests: XCTestCase {
             statusReasons: [],
             completedAt: referenceDate.addingTimeInterval(1_000),
             algorithmMetadata: AnalysisAlgorithmMetadata(
-                analysisVersion: 5,
+                analysisVersion: PilotStudyConfiguration.analysisVersion,
                 bodyPoseRevision: 1,
                 personSegmentationRevision: 1,
                 operatingSystemVersion: "test-os",
                 thresholdSetIdentifier: "engineering-v1"
             )
         )
+    }
+
+    func testPilotPayloadVersionTracksTheAnalysisEngine() throws {
+        let payload = try PilotResultsBuilder.make(session: completedSession(), scans: [])
+
+        XCTAssertEqual(PilotStudyConfiguration.analysisVersion, AnalysisStore.currentAnalysisVersion)
+        XCTAssertEqual(payload.analysisVersion, AnalysisStore.currentAnalysisVersion)
     }
 
     private func activeEnrollment(ongoingConsent: PilotOngoingConsent?) -> PilotLocalEnrollment {

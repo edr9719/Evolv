@@ -1,0 +1,91 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "csv"
+require "digest"
+require "json"
+require "open3"
+require "tempfile"
+
+manifest_path, split_lock_path, results_path, review_path, output_path = ARGV
+abort "Usage: scripts/evolv-phase5-study-gate PARTICIPANTS.csv SPLIT_LOCK.json RESULTS.csv SUBGROUP_REVIEW.json [OUTPUT.json]" unless
+  manifest_path && File.file?(manifest_path) && split_lock_path && File.file?(split_lock_path) && results_path && File.file?(results_path) &&
+    review_path && File.file?(review_path)
+
+manifest = CSV.read(manifest_path, headers: true)
+required = %w[
+  pseudonymous_subject split consent_classification age_band body_type skin_tone
+  clothing device environment scan_count notes
+]
+missing = required - (manifest.headers || [])
+abort "Participant manifest is missing columns: #{missing.join(', ')}" unless missing.empty?
+participants = manifest.map(&:to_h)
+split_lock = JSON.parse(File.read(split_lock_path))
+abort "Invalid validation split lock" unless split_lock["schema_version"] == 1
+assignments = participants.map { |row| [row["pseudonymous_subject"], row["split"]] }.sort
+abort "Participant assignments changed after the validation split was locked" unless
+  split_lock["participant_assignment_sha256"] == Digest::SHA256.hexdigest(JSON.generate(assignments))
+abort "Participant manifest contains duplicate subjects" unless
+  participants.map { |row| row["pseudonymous_subject"] }.uniq.length == participants.length
+abort "Pre-release validation requires at least 30 participants" if participants.length < 30
+
+participants.each_with_index do |row, index|
+  line = index + 2
+  abort "Invalid pseudonymous subject on participant line #{line}" unless
+    row["pseudonymous_subject"].match?(/\A[A-Za-z0-9_-]{3,40}\z/)
+  abort "Invalid split on participant line #{line}" unless %w[calibration heldout].include?(row["split"])
+  abort "Invalid consent classification on participant line #{line}" unless
+    %w[results_only results_and_selected_photos].include?(row["consent_classification"])
+  abort "Participant line #{line} has fewer than five fully repositioned scans" unless row["scan_count"].to_i >= 5
+  required.reject { |field| field == "notes" }.each do |field|
+    abort "Blank #{field} on participant line #{line}" if row[field].to_s.strip.empty?
+  end
+end
+
+calibration_count = participants.count { |row| row["split"] == "calibration" }
+heldout_count = participants.count { |row| row["split"] == "heldout" }
+abort "At least 10 calibration participants are required" if calibration_count < 10
+abort "At least 10 held-out participants are required" if heldout_count < 10
+
+results = CSV.read(results_path, headers: true).map(&:to_h)
+manifest_by_id = participants.to_h { |row| [row["pseudonymous_subject"], row] }
+unknown = results.map { |row| row["participant_id"] }.uniq - manifest_by_id.keys
+abort "Results contain subjects missing from the manifest: #{unknown.join(', ')}" unless unknown.empty?
+missing_results = manifest_by_id.keys - results.map { |row| row["participant_id"] }.uniq
+abort "Manifest subjects have no result rows: #{missing_results.join(', ')}" unless missing_results.empty?
+
+results.group_by { |row| row["participant_id"] }.each do |participant_id, rows|
+  expected_split = manifest_by_id.fetch(participant_id).fetch("split")
+  abort "Result split disagrees with manifest for #{participant_id}" unless rows.all? { |row| row["split"] == expected_split }
+  comparisons = rows.map { |row| row["comparison_id"] }.uniq
+  abort "#{participant_id} has fewer than four baseline-to-repeat comparisons" if comparisons.length < 4
+  rows.group_by { |row| row["comparison_id"] }.each do |comparison_id, comparison_rows|
+    regions = comparison_rows.map { |row| row["region"] }.uniq.sort
+    required_regions = %w[arms chest shoulders waist]
+    abort "#{participant_id}/#{comparison_id} does not contain all four relaxed regions" unless
+      regions == required_regions
+  end
+end
+
+Tempfile.create(["evolv-repeatability", ".json"]) do |stats_file|
+  command = [File.join(__dir__, "evolv-validation-stats"), results_path, stats_file.path, review_path]
+  _stdout, stderr, status = Open3.capture3(*command)
+  abort "Repeatability analysis failed: #{stderr.strip}" unless status.success?
+  stats = JSON.parse(File.read(stats_file.path))
+  report = {
+    "schema_version" => 1,
+    "participants" => {
+      "total" => participants.length,
+      "calibration" => calibration_count,
+      "heldout" => heldout_count,
+      "minimum_five_scans_each" => true,
+      "minimum_four_comparisons_each" => true
+    },
+    "split_lock" => split_lock,
+    "repeatability" => stats,
+    "phase5_human_gate_passed" => stats["promote_to_validated_v1"] == true
+  }
+  rendered = JSON.pretty_generate(report) + "\n"
+  output_path ? File.write(output_path, rendered) : puts(rendered)
+  abort "Held-out validation did not pass every promotion gate" unless report["phase5_human_gate_passed"]
+end

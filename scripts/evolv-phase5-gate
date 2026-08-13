@@ -1,0 +1,178 @@
+#!/bin/zsh
+set -euo pipefail
+
+SCRIPT_DIR=${0:A:h}
+REPO_ROOT=${SCRIPT_DIR:h}
+MODE=${1:-automated}
+DEVICE_ID=${EVOLV_DEVICE_UDID:-}
+PARTICIPANTS=""
+SPLIT_LOCK=""
+REPEATABILITY=""
+SUBGROUP_REVIEW=""
+LONGITUDINAL=""
+RUN_STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+REPORT_DIR="$REPO_ROOT/ios/build/phase5-validation/$RUN_STAMP"
+
+usage() {
+  print "Usage: scripts/evolv-phase5-gate automated|device|pilot|human|release [options]"
+  print ""
+  print "  automated  Public fixtures, privacy/config contracts, statistical self-tests, unit tests, and unsigned build"
+  print "  device     Physical-iPhone Vision fixture plan"
+  print "  pilot      Automated + physical-device gates required for an unvalidated TestFlight study build"
+  print "  human      Locked 30+ participant repeatability and subgroup-review gates"
+  print "  release    Pilot + human gates; never deploys or uploads a build"
+  print ""
+  print "Options:"
+  print "  --device UDID"
+  print "  --participants PATH"
+  print "  --split-lock PATH"
+  print "  --repeatability PATH"
+  print "  --subgroup-review PATH"
+  print "  --longitudinal PATH     Optional 8–12 week directional-corroboration data"
+}
+
+if [[ "$MODE" == "-h" || "$MODE" == "--help" ]]; then
+  usage
+  exit 0
+fi
+if [[ "$MODE" != "automated" && "$MODE" != "device" && "$MODE" != "pilot" && \
+      "$MODE" != "human" && "$MODE" != "release" ]]; then
+  usage
+  exit 64
+fi
+shift || true
+while (( $# > 0 )); do
+  case "$1" in
+    --device) DEVICE_ID=${2:-}; shift 2 ;;
+    --participants) PARTICIPANTS=${2:-}; shift 2 ;;
+    --split-lock) SPLIT_LOCK=${2:-}; shift 2 ;;
+    --repeatability) REPEATABILITY=${2:-}; shift 2 ;;
+    --subgroup-review) SUBGROUP_REVIEW=${2:-}; shift 2 ;;
+    --longitudinal) LONGITUDINAL=${2:-}; shift 2 ;;
+    *) print -u2 "Unknown argument: $1"; usage; exit 64 ;;
+  esac
+done
+
+fail() {
+  print -u2 "Phase 5 gate failed: $1"
+  exit 1
+}
+
+require_file() {
+  [[ -f "$2" ]] || fail "$1 file is missing: ${2:-not supplied}"
+}
+
+write_status() {
+  local automated=$1
+  local device=$2
+  local human=$3
+  local pilot_ready=$4
+  local release_ready=$5
+  mkdir -p "$REPORT_DIR"
+  jq -n \
+    --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg mode "$MODE" \
+    --arg analysis_version "$(awk '/static let currentAnalysisVersion =/ { print $NF; exit }' "$REPO_ROOT/ios/Evolv/Services/Analysis/AnalysisStore.swift")" \
+    --arg threshold_set "engineering-v1" \
+    --argjson automated "$automated" \
+    --argjson device "$device" \
+    --argjson human "$human" \
+    --argjson pilot_ready "$pilot_ready" \
+    --argjson release_ready "$release_ready" \
+    '{schema_version:1,generated_at:$generated_at,mode:$mode,analysis_version:($analysis_version|tonumber),threshold_set_identifier:$threshold_set,gates:{automated:$automated,physical_device:$device,human_validation:$human},pilot_testflight_ready:$pilot_ready,public_release_gate_passed:$release_ready,eligible_for_validated_v1_promotion:$release_ready,thresholds_validated:false}' \
+    > "$REPORT_DIR/status.json"
+}
+
+run_automated() {
+  print "Phase 5 automated: fixture and privacy contracts"
+  "$SCRIPT_DIR/evolv-fixture-audit"
+  "$SCRIPT_DIR/evolv-pilot-readiness" config
+
+  print "Phase 5 automated: statistical and longitudinal self-tests"
+  "$SCRIPT_DIR/test-evolv-validation-stats"
+  "$SCRIPT_DIR/test-evolv-longitudinal-validation"
+
+  if rg -n 'isValidated: true|identifier: "validated-' "$REPO_ROOT/ios/Evolv"; then
+    fail "validated thresholds are compiled before held-out human gates pass"
+  fi
+
+  print "Phase 5 automated: simulator-safe unit plan"
+  "$SCRIPT_DIR/test-evolv-analysis" unit
+
+  print "Phase 5 automated: unsigned generic-device build"
+  mkdir -p "$REPORT_DIR/unsigned-build"
+  xcodebuild \
+    -project "$REPO_ROOT/ios/Evolv.xcodeproj" \
+    -scheme Evolv \
+    -destination 'generic/platform=iOS' \
+    -derivedDataPath "$REPORT_DIR/unsigned-build/DerivedData" \
+    CODE_SIGNING_ALLOWED=NO \
+    build > "$REPORT_DIR/unsigned-build/xcodebuild.log"
+
+  git -C "$REPO_ROOT" diff --check
+  print "Phase 5 automated gates passed."
+}
+
+run_device() {
+  [[ -n "$DEVICE_ID" ]] || fail "a physical iPhone UDID is required with --device"
+  "$SCRIPT_DIR/test-evolv-analysis" device --device "$DEVICE_ID"
+  print "Phase 5 physical-device gates passed."
+}
+
+run_human() {
+  require_file "participant manifest" "$PARTICIPANTS"
+  require_file "locked split" "$SPLIT_LOCK"
+  require_file "repeatability results" "$REPEATABILITY"
+  require_file "subgroup review" "$SUBGROUP_REVIEW"
+  mkdir -p "$REPORT_DIR"
+  "$SCRIPT_DIR/evolv-phase5-study-gate" \
+    "$PARTICIPANTS" "$SPLIT_LOCK" "$REPEATABILITY" "$SUBGROUP_REVIEW" \
+    "$REPORT_DIR/human-validation.json"
+  if [[ -n "$LONGITUDINAL" ]]; then
+    require_file "longitudinal results" "$LONGITUDINAL"
+    "$SCRIPT_DIR/evolv-longitudinal-validation" \
+      "$LONGITUDINAL" "$REPORT_DIR/longitudinal-validation.json"
+  fi
+  print "Phase 5 held-out human-validation gates passed."
+}
+
+preflight_human_inputs() {
+  require_file "participant manifest" "$PARTICIPANTS"
+  require_file "locked split" "$SPLIT_LOCK"
+  require_file "repeatability results" "$REPEATABILITY"
+  require_file "subgroup review" "$SUBGROUP_REVIEW"
+  if [[ -n "$LONGITUDINAL" ]]; then
+    require_file "longitudinal results" "$LONGITUDINAL"
+  fi
+}
+
+case "$MODE" in
+  automated)
+    run_automated
+    write_status true false false false false
+    ;;
+  device)
+    run_device
+    write_status false true false false false
+    ;;
+  pilot)
+    run_automated
+    run_device
+    write_status true true false true false
+    ;;
+  human)
+    preflight_human_inputs
+    run_human
+    write_status false false true false false
+    ;;
+  release)
+    preflight_human_inputs
+    [[ -n "$DEVICE_ID" ]] || fail "a physical iPhone UDID is required with --device"
+    run_automated
+    run_device
+    run_human
+    write_status true true true true true
+    ;;
+esac
+
+print "Phase 5 report: $REPORT_DIR/status.json"

@@ -16,6 +16,7 @@ final class AnalysisFixtureDeviceTests: XCTestCase {
         var consentClassification: String
         var fixtures: [Fixture]
         var expectedAnalyticalRegions: [BodyRegion]
+        var expectedRegionsByPose: [String: [BodyRegion]]
         var deterministicTransformations: [String]
         var deliberatelyInvalid: [String]
     }
@@ -42,7 +43,7 @@ final class AnalysisFixtureDeviceTests: XCTestCase {
     func testPublicManifestAndFourIdenticalWeeksRemainStable() async throws {
         let started = ProcessInfo.processInfo.systemUptime
         let manifest = try loadManifest()
-        XCTAssertEqual(manifest.schemaVersion, 1)
+        XCTAssertEqual(manifest.schemaVersion, 2)
         XCTAssertEqual(manifest.consentClassification, "public_generated")
         XCTAssertEqual(manifest.fixtures.count, 9)
         let required = manifest.fixtures.filter { $0.expectedCondition == "valid_mandatory" }
@@ -168,6 +169,45 @@ final class AnalysisFixtureDeviceTests: XCTestCase {
         }
     }
 
+    func testOptionalFixturesProduceStableIsolatedSamePoseEvidence() async throws {
+        let manifest = try loadManifest()
+        let optional = manifest.fixtures.filter { $0.expectedCondition == "valid_optional" }
+        XCTAssertEqual(optional.count, Pose.showcase.count)
+
+        let baseline = try await process(optional)
+        let current = try await process(optional, baseline: baseline)
+        XCTAssertEqual(baseline.count, optional.count)
+        XCTAssertEqual(current.count, optional.count)
+
+        for processed in current {
+            let baselineProfile = try XCTUnwrap(
+                baseline.first { $0.fixture.pose == processed.fixture.pose }?.profile
+            )
+            let comparison = VisualSignalEngine.comparePosePair(
+                baselineProfile: baselineProfile,
+                currentProfile: processed.profile,
+                thresholds: .engineeringV1
+            )
+            XCTAssertEqual(
+                comparison.availability,
+                .comparable,
+                "\(processed.fixture.pose.rawValue) did not produce same-pose evidence"
+            )
+            let expected = Set(try XCTUnwrap(
+                manifest.expectedRegionsByPose[processed.fixture.pose.rawValue]
+            ))
+            XCTAssertEqual(
+                Set(comparison.supportedRegions.map(\.region)),
+                expected,
+                "\(processed.fixture.pose.rawValue) did not cover every declared fixture region"
+            )
+            XCTAssertTrue(
+                comparison.supportedRegions.allSatisfy { $0.status == .stable },
+                "Identical \(processed.fixture.pose.rawValue) fixtures must remain stable"
+            )
+        }
+    }
+
     func testThreePosePerformanceAndRegressionBaseline() throws {
         let manifest = try loadManifest()
         let required = manifest.fixtures.filter { $0.expectedCondition == "valid_mandatory" }
@@ -188,7 +228,7 @@ final class AnalysisFixtureDeviceTests: XCTestCase {
         let key = [
             UIDevice.current.model,
             UIDevice.current.systemVersion,
-            "analysis-4",
+            "analysis-\(AnalysisStore.currentAnalysisVersion)",
             "pose-\(BodyPoseExtractor.bodyPoseRevision)",
             "segmentation-\(SilhouetteAnalyzer.personSegmentationRevision)",
             SilhouetteAnalyzer.segmentationQualityIdentifier
@@ -335,9 +375,19 @@ final class AnalysisFixtureDeviceTests: XCTestCase {
             do {
                 analyzed = try await SilhouetteAnalyzer.analyzeWithDebug(image: image, extractedPose: extracted)
             } catch {
+                if let cgImage = image.cgImage,
+                   let failureMask = try? await SilhouetteAnalyzer.personMask(cgImage: cgImage) {
+                    attachFailureMask(
+                        failureMask,
+                        landmarks: extracted.landmarks,
+                        name: "\(fixture.id)-failed-mask-landmarks"
+                    )
+                }
                 let landmarkSummary = extracted.landmarks
                     .sorted { $0.joint < $1.joint }
-                    .map { "\($0.joint)=\(String(format: "%.3f", $0.confidence))" }
+                    .map {
+                        "\($0.joint)=(\(String(format: "%.3f", $0.x)),\(String(format: "%.3f", $0.y));\(String(format: "%.3f", $0.confidence)))"
+                    }
                     .joined(separator: ",")
                 throw FixtureError.processing(
                     fixture: fixture.id,
@@ -506,6 +556,38 @@ final class AnalysisFixtureDeviceTests: XCTestCase {
         add(attachment)
     }
 
+    private func attachFailureMask(
+        _ mask: BinaryPersonMask,
+        landmarks: [NormalizedLandmark],
+        name: String
+    ) {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let image = UIGraphicsImageRenderer(
+            size: CGSize(width: mask.width, height: mask.height),
+            format: format
+        ).image { context in
+            UIColor.black.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: mask.width, height: mask.height))
+            UIColor.white.setFill()
+            for y in 0..<mask.height {
+                for x in 0..<mask.width where mask.isForeground(x: x, y: y) {
+                    context.fill(CGRect(x: x, y: y, width: 1, height: 1))
+                }
+            }
+            UIColor.systemRed.setFill()
+            for landmark in landmarks {
+                let x = CGFloat(landmark.x) * CGFloat(mask.width - 1)
+                let y = CGFloat(landmark.y) * CGFloat(mask.height - 1)
+                context.fill(CGRect(x: x - 3, y: y - 3, width: 6, height: 6))
+            }
+        }
+        let attachment = XCTAttachment(image: image)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
     private func attachReport(
         fixture: String,
         availability: AnalysisAvailability,
@@ -539,11 +621,25 @@ final class AnalysisFixtureDeviceTests: XCTestCase {
             thresholdsValidated: false
         )
         let wording = InsightEngine.templateFallback(signals: interpreted)
+        let supported = (signals.regionalComparisons ?? []).filter { $0.status != .unavailable }
+        let pair = ScanPairComparison(
+            beforeScanID: UUID(),
+            afterScanID: UUID(),
+            availability: supported.isEmpty ? .partialEvidence : .comparable,
+            relaxedRegions: signals.regionalComparisons ?? [],
+            poseComparisons: signals.poseComparisons ?? [],
+            evidenceStrength: supported.isEmpty ? .low : .medium,
+            reason: supported.isEmpty ? "no_supported_same_pose_evidence" : nil
+        )
+        let narrative = ComparisonNarrativeEngine.make(
+            comparison: pair,
+            goal: .maintain
+        )
         let report = AnalysisRunReport(
             fixtureIdentifier: fixture,
             generatedAt: Date(),
             metadata: AnalysisAlgorithmMetadata(
-                analysisVersion: 4,
+                analysisVersion: AnalysisStore.currentAnalysisVersion,
                 bodyPoseRevision: BodyPoseExtractor.bodyPoseRevision,
                 personSegmentationRevision: SilhouetteAnalyzer.personSegmentationRevision,
                 operatingSystemVersion: UIDevice.current.systemVersion,
@@ -552,7 +648,7 @@ final class AnalysisFixtureDeviceTests: XCTestCase {
             availability: availability,
             regionalComparisons: signals.regionalComparisons ?? [],
             signals: literalSignals,
-            headline: wording.headline,
+            headline: narrative.headline,
             processingDurationSeconds: duration,
             failures: failures,
             poseFeatures: processed.flatMap { $0.profile.regionFeatures ?? [] },
@@ -563,7 +659,8 @@ final class AnalysisFixtureDeviceTests: XCTestCase {
             stageTimingsSeconds: Dictionary(uniqueKeysWithValues: processed.map {
                 ("\($0.fixture.pose.rawValue)_full_pipeline", $0.processingDurationSeconds)
             }).merging(["complete_fixture": duration]) { _, latest in latest },
-            wording: wording
+            wording: wording,
+            comparisonNarrative: narrative
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

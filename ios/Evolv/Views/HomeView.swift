@@ -24,13 +24,14 @@ struct HomeView: View {
                             insightHero
                                 .padding(.horizontal, 24)
             
-                            if app.hasAnyScans {
+                            if !app.activeCanonicalScans.isEmpty {
                                 summaryRow
                                     .padding(.horizontal, 24)
                             }
             
-                            if !app.estimatedDeltas.isEmpty {
-                                changesSection
+                            if let measurementComparison = app.currentMeasurementComparison,
+                               !measurementComparison.supportedResults.isEmpty {
+                                changesSection(measurementComparison)
                                     .padding(.horizontal, 24)
                             }
             
@@ -40,7 +41,7 @@ struct HomeView: View {
                             actionRow
                                 .padding(.horizontal, 24)
             
-                            if app.hasAnyScans {
+                            if !app.activeCanonicalScans.isEmpty {
                                 moreLink
                                     .padding(.horizontal, 24)
                                     .padding(.bottom, 28)
@@ -84,7 +85,10 @@ struct HomeView: View {
                         .presentationDragIndicator(.visible)
                 }
                 .sheet(isPresented: $showLogMeasurement) {
-                    LogMeasurementSheet()
+                    LogMeasurementSheet(
+                        scanID: app.activeLatestScan?.id,
+                        measurementDate: app.activeLatestScan?.date
+                    )
                         .presentationDetents([.medium, .large])
                         .presentationDragIndicator(.visible)
                 }
@@ -144,7 +148,7 @@ struct HomeView: View {
                     Image(systemName: "sparkles")
                         .font(.system(size: 12))
                         .foregroundStyle(EvolvTheme.accent)
-                    Text(app.hasAnyScans ? heroPeriodLabel : "WELCOME")
+                    Text(app.activeCanonicalScans.isEmpty ? "WELCOME" : heroPeriodLabel)
                         .font(.system(size: 10, weight: .semibold, design: .rounded))
                         .tracking(1.6)
                         .foregroundStyle(EvolvTheme.textFaint)
@@ -166,17 +170,21 @@ struct HomeView: View {
                 }
 
                 HStack {
-                    if app.latestAnalysis?.confidence.hasSufficientEvidence == true {
+                    if let narrative = app.currentProgressNarrative,
+                       narrative.status != .unavailable,
+                       !narrative.findings.isEmpty {
                         ConfidenceChip(confidence: s.confidence)
-                    }
-                    if let source = app.latestAnalysis?.generatedInsight?.source,
+                        Text("On-device evidence summary")
+                            .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                            .foregroundStyle(EvolvTheme.textFaint)
+                    } else if let source = app.latestAnalysis?.generatedInsight?.source,
                        app.latestAnalysis?.analysisAvailability == .comparable {
                         Text(source.label)
                             .font(.system(size: 10.5, weight: .medium, design: .rounded))
                             .foregroundStyle(EvolvTheme.textFaint)
                     }
                     Spacer()
-                    if let last = app.latestScan {
+                    if let last = app.activeLatestScan {
                         Text(last.date, format: .relative(presentation: .named))
                             .font(.system(size: 11, weight: .medium, design: .rounded))
                             .foregroundStyle(EvolvTheme.textFaint)
@@ -187,6 +195,7 @@ struct HomeView: View {
     }
 
     private var heroPeriodLabel: String {
+        if app.activeCanonicalScans.count >= 2 { return "SINCE CURRENT BASELINE" }
         let weeks = app.weeksTracked
         if weeks == 0 { return "THIS WEEK" }
         if weeks < 4 { return "WEEK \(weeks + 1)" }
@@ -207,8 +216,8 @@ struct HomeView: View {
 
     private var summaryRow: some View {
         return HStack(spacing: 10) {
-            summaryCell(title: "Evidence", value: app.latestScan?.analysisAvailability?.label ?? "Legacy")
-            summaryCell(title: "Progress scans", value: "\(app.canonicalScans.count)")
+            summaryCell(title: "Evidence", value: app.activeLatestScan?.analysisAvailability?.label ?? "Legacy")
+            summaryCell(title: "Progress scans", value: "\(app.activeCanonicalScans.count)")
             summaryCell(title: "Measurements", value: "\(app.measurements.count)")
         }
     }
@@ -238,10 +247,10 @@ struct HomeView: View {
 
     // MARK: - Changes section
 
-    private var changesSection: some View {
+    private func changesSection(_ comparison: ScanPairMeasurementComparison) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("ESTIMATED CHANGE")
+                Text("BASELINE → LATEST MEASUREMENTS")
                     .font(.system(size: 10, weight: .semibold, design: .rounded))
                     .tracking(1.5)
                     .foregroundStyle(EvolvTheme.textFaint)
@@ -256,9 +265,9 @@ struct HomeView: View {
             .padding(.horizontal, 4)
 
             VStack(spacing: 0) {
-                ForEach(Array(app.estimatedDeltas.enumerated()), id: \.element.id) { idx, d in
-                    MinimalDeltaRow(delta: d)
-                    if idx < app.estimatedDeltas.count - 1 {
+                ForEach(Array(comparison.supportedResults.enumerated()), id: \.element.id) { idx, result in
+                    LoggedMeasurementDeltaRow(result: result)
+                    if idx < comparison.supportedResults.count - 1 {
                         Divider().background(EvolvTheme.stroke).padding(.leading, 18)
                     }
                 }
@@ -271,6 +280,10 @@ struct HomeView: View {
                             .stroke(EvolvTheme.stroke, lineWidth: 1)
                     }
             }
+            Text("Exact values you entered for these two scans. Photo-based findings remain separate.")
+                .font(.system(size: 10.5, design: .rounded))
+                .foregroundStyle(EvolvTheme.textFaint)
+                .padding(.horizontal, 4)
         }
     }
 
@@ -278,7 +291,7 @@ struct HomeView: View {
 
     private var confidenceCard: some View {
         let (text, icon, color): (String, String, Color) = {
-            if !app.hasAnyScans {
+            if app.activeCanonicalScans.isEmpty {
                 return ("No scans yet — your first capture sets the baseline.", "camera", EvolvTheme.textMuted)
             }
             if app.analysisPending {
@@ -289,7 +302,7 @@ struct HomeView: View {
                confidence.hasSufficientEvidence == true {
                 return ("Latest analysis evidence: \(confidence.overall.label.lowercased())", "checkmark.seal.fill", EvolvTheme.improving)
             }
-            if app.canonicalScans.count == 1 {
+            if app.activeCanonicalScans.count == 1 {
                 return ("Baseline saved. A second comparable scan is required before progress can be assessed.", "viewfinder.circle", EvolvTheme.textMuted)
             }
             return ("Evidence is limited. Unsupported body regions were excluded instead of estimated.", "eye.slash", EvolvTheme.stable)
@@ -328,9 +341,9 @@ struct HomeView: View {
             ) {
                 beginCaptureDecision()
             }
-            if app.hasAnyScans && app.measurements.count < 2 {
+            if let latest = app.activeLatestScan, app.measurement(for: latest.id) == nil {
                 Button { showLogMeasurement = true } label: {
-                    Text("Log a measurement")
+                    Text("Add measurements to latest scan")
                         .font(.system(size: 13, weight: .medium, design: .rounded))
                         .foregroundStyle(EvolvTheme.textMuted)
                 }
@@ -341,7 +354,7 @@ struct HomeView: View {
 
     private var captureButtonTitle: String {
         guard let today = app.todayCanonicalScan else {
-            return app.hasAnyScans ? "New scan" : "Capture baseline"
+            return app.activeCanonicalScans.isEmpty ? "Capture baseline" : "New scan"
         }
         return today.recommendedRepairPoses.isEmpty ? "Today's scan options" : "Improve today's scan"
     }
@@ -372,44 +385,62 @@ struct HomeView: View {
     }
 }
 
-// MARK: - Minimal delta row
+// MARK: - Logged measurement delta
 
-struct MinimalDeltaRow: View {
+struct LoggedMeasurementDeltaRow: View {
     @Environment(AppState.self) private var app
-    let delta: EstimatedDelta
+    let result: LoggedMeasurementComparison
 
     var body: some View {
-        HStack(spacing: 14) {
-            Text(delta.label)
-                .font(.system(size: 15, weight: .medium, design: .rounded))
-                .foregroundStyle(EvolvTheme.text)
-            Spacer()
-            Text(displayValue)
-                .font(.system(size: 14, weight: .semibold, design: .rounded))
-                .foregroundStyle(valueColor)
-                .monospacedDigit()
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 14) {
+                Text(result.metric.label)
+                    .font(.system(size: 14, weight: .medium, design: .rounded))
+                    .foregroundStyle(EvolvTheme.text)
+                Spacer()
+                Text(displayValue)
+                    .font(.system(size: 13.5, weight: .semibold, design: .rounded))
+                    .foregroundStyle(valueColor)
+                    .monospacedDigit()
+            }
+            if let relationshipText {
+                Text(relationshipText)
+                    .font(.system(size: 10.5, design: .rounded))
+                    .foregroundStyle(relationshipColor)
+            }
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 16)
+        .accessibilityElement(children: .combine)
     }
 
-    private var isMeaningful: Bool { abs(delta.value) >= 0.2 }
-
     private var displayValue: String {
-        if !isMeaningful {
-            if let note = delta.note { return note }
-            return "Stable"
+        guard let delta = result.delta else { return "Not logged" }
+        if result.status == .stable { return "No logged change" }
+        if result.metric.isMass {
+            return UnitFormatter.signedMass(delta, unit: app.profile.massUnit)
         }
-        if delta.unit == "cm" {
-            return UnitFormatter.signedLength(delta.value, unit: app.profile.lengthUnit)
-        }
-        let sign = delta.value > 0 ? "+" : ""
-        return "\(sign)\(String(format: "%.0f", delta.value)) \(delta.unit)"
+        return UnitFormatter.signedLength(
+            delta,
+            unit: app.profile.lengthUnit,
+            fractionDigits: app.profile.lengthUnit == .cm ? 1 : 2
+        )
     }
 
     private var valueColor: Color {
-        if !isMeaningful { return EvolvTheme.textMuted }
-        return EvolvTheme.statusColor(delta.status)
+        result.status == .stable ? EvolvTheme.accent : EvolvTheme.text
+    }
+
+    private var relationshipText: String? {
+        switch result.visualRelationship {
+        case .sameDirection: return "Same direction as the photo silhouette"
+        case .differentResult: return "Different result from the photo silhouette"
+        case .visualUnavailable: return nil
+        }
+    }
+
+    private var relationshipColor: Color {
+        result.visualRelationship == .differentResult ? EvolvTheme.stable : EvolvTheme.textFaint
     }
 }
 
@@ -418,10 +449,30 @@ struct MinimalDeltaRow: View {
 struct LogMeasurementSheet: View {
     @Environment(AppState.self) private var app
     @Environment(\.dismiss) private var dismiss
+
+    let scanID: UUID?
+    let measurementDate: Date?
+
+    @State private var includeWeight = false
+    @State private var includeArms = false
+    @State private var includeChest = false
+    @State private var includeWaist = false
+    @State private var includeShoulders = false
+    @State private var includeThighs = false
     @State private var weightKg: Double = 76
     @State private var armsCm: Double = 36
     @State private var chestCm: Double = 100
     @State private var waistCm: Double = 80
+    @State private var shouldersCm: Double = 110
+    @State private var thighsCm: Double = 55
+    @State private var didInitialize = false
+    @State private var saveError: String? = nil
+    @State private var confirmDelete = false
+
+    init(scanID: UUID? = nil, measurementDate: Date? = nil) {
+        self.scanID = scanID
+        self.measurementDate = measurementDate
+    }
 
     var body: some View {
         NavigationStack {
@@ -429,29 +480,47 @@ struct LogMeasurementSheet: View {
                 AmbientBackground()
                 ScrollView {
                     VStack(spacing: 16) {
-                        Text("Log today's numbers")
+                        Text(existingMeasurement == nil ? "Log measured values" : "Edit measured values")
                             .font(.system(size: 22, weight: .semibold, design: .rounded))
                             .foregroundStyle(EvolvTheme.text)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                        Text("Updates to Estimated Change. Skip any field you don't track.")
+                        Text(introText)
                             .font(.system(size: 13, design: .rounded))
                             .foregroundStyle(EvolvTheme.textMuted)
+                            .lineSpacing(2)
                             .frame(maxWidth: .infinity, alignment: .leading)
 
-                        massField("Weight", kg: $weightKg, unit: app.profile.massUnit)
-                        lengthField("Arms", cm: $armsCm, unit: app.profile.lengthUnit)
-                        lengthField("Chest", cm: $chestCm, unit: app.profile.lengthUnit)
-                        lengthField("Waist", cm: $waistCm, unit: app.profile.lengthUnit)
+                        optionalMassField("Weight", included: $includeWeight, kg: $weightKg)
+                        optionalLengthField("Arm circumference", included: $includeArms, cm: $armsCm)
+                        optionalLengthField("Chest circumference", included: $includeChest, cm: $chestCm)
+                        optionalLengthField("Waist circumference", included: $includeWaist, cm: $waistCm)
+                        optionalLengthField("Shoulder circumference", included: $includeShoulders, cm: $shouldersCm)
+                        optionalLengthField("Thigh circumference", included: $includeThighs, cm: $thighsCm)
 
                         EvolvPrimaryButton(title: "Save measurement", icon: "checkmark") {
                             save()
                         }
+                        .disabled(!hasAnyIncludedValue)
+                        .opacity(hasAnyIncludedValue ? 1 : 0.45)
                         .padding(.top, 8)
+
+                        if existingMeasurement != nil {
+                            Button(role: .destructive) {
+                                confirmDelete = true
+                            } label: {
+                                Text("Remove measurement from this scan")
+                                    .font(.system(size: 12.5, weight: .medium, design: .rounded))
+                                    .foregroundStyle(EvolvTheme.stalled)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 10)
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
                     .padding(20)
                 }
             }
-            .navigationTitle("Update")
+            .navigationTitle(scanID == nil ? "Measurement" : "Scan measurement")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -459,19 +528,90 @@ struct LogMeasurementSheet: View {
                 }
             }
             .onAppear {
-                if let m = app.measurements.last {
-                    weightKg = m.weightKg
-                    armsCm = m.arms ?? app.profile.arms ?? 36
-                    chestCm = m.chest ?? app.profile.chest ?? 100
-                    waistCm = m.waist ?? app.profile.waist ?? 80
-                } else {
-                    weightKg = app.profile.weightKg
-                    armsCm = app.profile.arms ?? 36
-                    chestCm = app.profile.chest ?? 100
-                    waistCm = app.profile.waist ?? 80
+                initializeOnce()
+            }
+            .alert("Measurement wasn't saved", isPresented: Binding(
+                get: { saveError != nil },
+                set: { if !$0 { saveError = nil } }
+            )) {
+                Button("OK", role: .cancel) { saveError = nil }
+            } message: {
+                Text(saveError ?? "Please try again.")
+            }
+            .confirmationDialog(
+                "Remove this measurement?",
+                isPresented: $confirmDelete,
+                titleVisibility: .visible
+            ) {
+                Button("Remove measurement", role: .destructive) {
+                    deleteExistingMeasurement()
                 }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("The scan and its photos will stay saved. Only the linked weight and tape values will be removed.")
             }
         }
+    }
+
+    private var existingMeasurement: Measurement? {
+        scanID.flatMap { app.measurement(for: $0) }
+    }
+
+    private var introText: String {
+        let scope = scanID == nil
+            ? "This entry stays in your measurement history."
+            : "These values will be linked only to this scan for exact before-and-after comparisons."
+        return "\(scope) Turn on only values you actually measured. Tape and weight results stay separate from photo-based silhouette evidence."
+    }
+
+    private var hasAnyIncludedValue: Bool {
+        includeWeight || includeArms || includeChest || includeWaist || includeShoulders || includeThighs
+    }
+
+    private func optionalMassField(
+        _ label: String,
+        included: Binding<Bool>,
+        kg: Binding<Double>
+    ) -> some View {
+        optionalField(label, included: included) {
+            massField(label, kg: kg, unit: app.profile.massUnit)
+        }
+    }
+
+    private func optionalLengthField(
+        _ label: String,
+        included: Binding<Bool>,
+        cm: Binding<Double>
+    ) -> some View {
+        optionalField(label, included: included) {
+            lengthField(label, cm: cm, unit: app.profile.lengthUnit)
+        }
+    }
+
+    private func optionalField<Content: View>(
+        _ label: String,
+        included: Binding<Bool>,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(spacing: 8) {
+            Toggle(isOn: included) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(label)
+                        .font(.system(size: 14, weight: .medium, design: .rounded))
+                        .foregroundStyle(EvolvTheme.text)
+                    Text(included.wrappedValue ? "Included" : "Not logged")
+                        .font(.system(size: 10.5, design: .rounded))
+                        .foregroundStyle(EvolvTheme.textFaint)
+                }
+            }
+            .tint(EvolvTheme.accent)
+            .padding(.horizontal, 4)
+
+            if included.wrappedValue {
+                content()
+            }
+        }
+        .animation(.easeInOut(duration: 0.18), value: included.wrappedValue)
     }
 
     private func massField(_ label: String, kg: Binding<Double>, unit: MassUnit) -> some View {
@@ -532,9 +672,56 @@ struct LogMeasurementSheet: View {
     }
 
     private func save() {
-        let m = Measurement(date: Date(), weightKg: weightKg, arms: armsCm, chest: chestCm, waist: waistCm, shoulders: app.profile.shoulders, thighs: app.profile.thighs)
-        app.addMeasurement(m)
-        dismiss()
+        guard hasAnyIncludedValue else { return }
+        let existing = existingMeasurement
+        let measurement = Measurement(
+            id: existing?.id ?? UUID(),
+            date: existing?.date ?? measurementDate ?? Date(),
+            weightKg: includeWeight ? weightKg : nil,
+            arms: includeArms ? armsCm : nil,
+            chest: includeChest ? chestCm : nil,
+            waist: includeWaist ? waistCm : nil,
+            shoulders: includeShoulders ? shouldersCm : nil,
+            thighs: includeThighs ? thighsCm : nil,
+            scanID: scanID
+        )
+        do {
+            try app.upsertMeasurement(measurement)
+            dismiss()
+        } catch {
+            saveError = error.localizedDescription
+        }
+    }
+
+    private func initializeOnce() {
+        guard !didInitialize else { return }
+        didInitialize = true
+        let existing = existingMeasurement
+        let recent = app.measurements.last
+
+        includeWeight = existing?.weightKg != nil
+        includeArms = existing?.arms != nil
+        includeChest = existing?.chest != nil
+        includeWaist = existing?.waist != nil
+        includeShoulders = existing?.shoulders != nil
+        includeThighs = existing?.thighs != nil
+
+        weightKg = existing?.weightKg ?? recent?.weightKg ?? app.profile.weightKg
+        armsCm = existing?.arms ?? recent?.arms ?? app.profile.arms ?? 36
+        chestCm = existing?.chest ?? recent?.chest ?? app.profile.chest ?? 100
+        waistCm = existing?.waist ?? recent?.waist ?? app.profile.waist ?? 80
+        shouldersCm = existing?.shoulders ?? recent?.shoulders ?? app.profile.shoulders ?? 110
+        thighsCm = existing?.thighs ?? recent?.thighs ?? app.profile.thighs ?? 55
+    }
+
+    private func deleteExistingMeasurement() {
+        guard let existingMeasurement else { return }
+        do {
+            try app.deleteMeasurement(id: existingMeasurement.id)
+            dismiss()
+        } catch {
+            saveError = error.localizedDescription
+        }
     }
 }
 

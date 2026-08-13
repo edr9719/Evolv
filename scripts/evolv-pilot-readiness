@@ -5,7 +5,12 @@ SCRIPT_DIR=${0:A:h}
 REPO_ROOT=${SCRIPT_DIR:h}
 PROJECT_REF=zaqbnznrfvapbgrjxskv
 EXPECTED_BUNDLE_ID=com.app.evolv
-EXPECTED_ANALYSIS_VERSION=5
+ANALYSIS_STORE="$REPO_ROOT/ios/Evolv/Services/Analysis/AnalysisStore.swift"
+EXPECTED_ANALYSIS_VERSION=$(awk '/static let currentAnalysisVersion =/ { print $NF; exit }' "$ANALYSIS_STORE")
+[[ "$EXPECTED_ANALYSIS_VERSION" == <-> ]] || {
+  print -u2 "Pilot readiness failed: current analysis version is missing or invalid"
+  exit 1
+}
 MODE=${1:-local}
 DEVICE_ID=${EVOLV_DEVICE_UDID:-}
 
@@ -120,8 +125,12 @@ run_config_gates() {
   [[ "$pbx_builds" == "$project_build" ]] ||
     fail "project.yml and Xcode project build numbers differ"
 
-  rg -q "static let currentAnalysisVersion = $EXPECTED_ANALYSIS_VERSION|analysisVersion: $EXPECTED_ANALYSIS_VERSION|analysisVersion = $EXPECTED_ANALYSIS_VERSION" \
-    "$REPO_ROOT/ios/Evolv" || fail "analysis version $EXPECTED_ANALYSIS_VERSION is not configured"
+  rg -q "static let analysisVersion = AnalysisStore.currentAnalysisVersion" \
+    "$REPO_ROOT/ios/Evolv/Models/PilotStudyModels.swift" ||
+    fail "pilot payload version is not tied to the analysis engine"
+  rg -q "CURRENT_ANALYSIS_VERSION = $EXPECTED_ANALYSIS_VERSION" \
+    "$REPO_ROOT/supabase/functions/_shared/pilot.ts" ||
+    fail "pilot service analysis version is out of sync"
   if [[ -f "$REPO_ROOT/private/pilot/public-key.txt" ]]; then
     local bundled_pilot_key researcher_pilot_key
     bundled_pilot_key=$(rg -o 'keyAgreementPublicKeyBase64 = "[A-Za-z0-9+/=]+"' \
@@ -150,7 +159,16 @@ run_local_gates() {
     "$REPO_ROOT/supabase/functions/pilot-retention/index.ts"
   ruby -c "$SCRIPT_DIR/evolv-pilot" >/dev/null
   ruby -c "$SCRIPT_DIR/evolv-validation-stats" >/dev/null
-  zsh -n "$SCRIPT_DIR/test-evolv-analysis" "$SCRIPT_DIR/test-evolv-pilot-security"
+  ruby -c "$SCRIPT_DIR/evolv-fixture-audit" >/dev/null
+  ruby -c "$SCRIPT_DIR/evolv-lock-validation-split" >/dev/null
+  ruby -c "$SCRIPT_DIR/evolv-phase5-study-gate" >/dev/null
+  ruby -c "$SCRIPT_DIR/evolv-longitudinal-validation" >/dev/null
+  zsh -n "$SCRIPT_DIR/test-evolv-analysis" "$SCRIPT_DIR/test-evolv-pilot-security" \
+    "$SCRIPT_DIR/evolv-phase5-gate" "$SCRIPT_DIR/test-evolv-validation-stats" \
+    "$SCRIPT_DIR/test-evolv-longitudinal-validation"
+  "$SCRIPT_DIR/evolv-fixture-audit"
+  "$SCRIPT_DIR/test-evolv-validation-stats"
+  "$SCRIPT_DIR/test-evolv-longitudinal-validation"
 
   local started_here=0
   if ! supabase status --workdir "$REPO_ROOT" >/dev/null 2>&1; then
@@ -193,7 +211,9 @@ run_local_gates() {
     if curl --fail --silent --request POST \
       --header 'Content-Type: application/json' --data '{}' \
       'http://127.0.0.1:8000/pilot-api/health' |
-      jq -e '.status == "ok" and .schemaVersion == 2 and .analysisVersion == 5' >/dev/null 2>&1; then
+      jq -e --argjson expected "$EXPECTED_ANALYSIS_VERSION" \
+        '.status == "ok" and .schemaVersion == 2 and .analysisVersion == $expected' \
+        >/dev/null 2>&1; then
       health_ok=true
       break
     fi

@@ -8,6 +8,12 @@ ONGOING_MIGRATION="$REPO_ROOT/supabase/migrations/20260810000200_pilot_ongoing_c
 SERVICE_ROLE_MIGRATION="$REPO_ROOT/supabase/migrations/20260811000100_pilot_service_role_access.sql"
 API_SOURCE="$REPO_ROOT/supabase/functions/pilot-api/index.ts"
 SHARED_SOURCE="$REPO_ROOT/supabase/functions/_shared/pilot.ts"
+ANALYSIS_STORE="$REPO_ROOT/ios/Evolv/Services/Analysis/AnalysisStore.swift"
+EXPECTED_ANALYSIS_VERSION=$(awk '/static let currentAnalysisVersion =/ { print $NF; exit }' "$ANALYSIS_STORE")
+[[ "$EXPECTED_ANALYSIS_VERSION" == <-> ]] || {
+  print -u2 "Pilot security gate failed: current analysis version is missing or invalid"
+  exit 1
+}
 
 fail() { print -u2 "Pilot security gate failed: $1"; exit 1; }
 stage() { print "Live gate: $1"; }
@@ -47,6 +53,7 @@ rg -q "to service_role" "$SERVICE_ROLE_MIGRATION" || fail "private pilot tables 
 rg -q "from public, anon, authenticated" "$SERVICE_ROLE_MIGRATION" || fail "private pilot sequences are exposed to client roles"
 rg -q 'route === "health"' "$API_SOURCE" || fail "deployment health contract is missing"
 rg -q 'global:participant' "$SHARED_SOURCE" || fail "participant endpoint lacks a global abuse ceiling"
+rg -q 'unsupported_analysis_version' "$SHARED_SOURCE" || fail "analysis-version payload validation is missing"
 rg -q 'storageError.*object_delete_failed' "$SHARED_SOURCE" || fail "retention does not fail closed on storage deletion errors"
 if rg -n "console\.(log|debug|info)|logger\." "$REPO_ROOT/supabase/functions"; then
   fail "edge functions must not log pilot payloads or URLs"
@@ -78,9 +85,10 @@ jq -e '
   .status == "ok" and
   .service == "evolv-pilot" and
   .schemaVersion == 2 and
-  .analysisVersion == 5 and
+  .analysisVersion == $analysis_version and
+  .minimumAnalysisVersion == 4 and
   (.consentVersions | sort) == (["pilot-consent-v1", "pilot-ongoing-v1"] | sort)
-' "$TEST_DIR/health.json" >/dev/null || fail "deployed health contract does not match this app"
+' --argjson analysis_version "$EXPECTED_ANALYSIS_VERSION" "$TEST_DIR/health.json" >/dev/null || fail "deployed health contract does not match this app"
 
 stage "unauthorized access"
 expect_status 401 -X POST "${HEADERS[@]}" --data '{}' "$API_BASE/status"
@@ -110,10 +118,14 @@ NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 stage "consistency submission validation and replay"
 jq -n \
   --arg session "$SESSION_ID" --arg submission "$SUBMISSION_ID" --arg idem "$IDEMPOTENCY_ID" --arg now "$NOW" \
-  '{client_submission_id:$submission,idempotency_key:$idem,consent:{version:"pilot-consent-v1",adult_confirmed:true,share_scope:"results_only",accepted_at:$now},results:{schema_version:1,local_session_id:$session,session_result:"consistent",started_at:$now,completed_at:$now,app_build:"security-test",analysis_version:5,threshold_set_identifier:"engineering-v1",device_model:"test",operating_system_version:"test",camera_position:"front",sets:[]},wrapped_key:null,objects:[]}' > "$TEST_DIR/init.json"
+  --argjson analysis_version "$EXPECTED_ANALYSIS_VERSION" \
+  '{client_submission_id:$submission,idempotency_key:$idem,consent:{version:"pilot-consent-v1",adult_confirmed:true,share_scope:"results_only",accepted_at:$now},results:{schema_version:1,local_session_id:$session,session_result:"consistent",started_at:$now,completed_at:$now,app_build:"security-test",analysis_version:$analysis_version,threshold_set_identifier:"engineering-v1",device_model:"test",operating_system_version:"test",camera_position:"front",sets:[]},wrapped_key:null,objects:[]}' > "$TEST_DIR/init.json"
 
 jq '.consent.adult_confirmed=false' "$TEST_DIR/init.json" > "$TEST_DIR/forged-consent.json"
 expect_status 400 -X POST "${HEADERS[@]}" "${AUTH[@]}" --data-binary "@$TEST_DIR/forged-consent.json" "$API_BASE/submissions/init"
+jq --argjson unsupported "$(( EXPECTED_ANALYSIS_VERSION + 1 ))" \
+  '.results.analysis_version=$unsupported' "$TEST_DIR/init.json" > "$TEST_DIR/future-analysis.json"
+expect_status 400 -X POST "${HEADERS[@]}" "${AUTH[@]}" --data-binary "@$TEST_DIR/future-analysis.json" "$API_BASE/submissions/init"
 jq '.consent.share_scope="results_and_selected_photos"' "$TEST_DIR/init.json" > "$TEST_DIR/photo-without-selection.json"
 expect_status 400 -X POST "${HEADERS[@]}" "${AUTH[@]}" --data-binary "@$TEST_DIR/photo-without-selection.json" "$API_BASE/submissions/init"
 jq '.objects=[{object_id:"00000000-0000-4000-8000-000000000001",set_number:1,pose:"front",sha256:("a"*64),byte_count:100}] | .wrapped_key={algorithm:"forged"}' "$TEST_DIR/init.json" > "$TEST_DIR/results-with-photo.json"
@@ -136,7 +148,8 @@ PROGRESS_IDEMPOTENCY=$(uuidgen | tr '[:upper:]' '[:lower:]')
 stage "separate ongoing consent"
 jq -n \
   --arg session "$PROGRESS_SESSION" --arg submission "$PROGRESS_SUBMISSION" --arg idem "$PROGRESS_IDEMPOTENCY" --arg now "$NOW" \
-  '{client_submission_id:$submission,idempotency_key:$idem,consent:{version:"pilot-ongoing-v1",adult_confirmed:true,share_scope:"results_only",accepted_at:$now},results:{schema_version:1,contribution_type:"progress_scan",local_session_id:$session,session_result:"comparable",started_at:$now,completed_at:$now,app_build:"security-test",analysis_version:5,threshold_set_identifier:"engineering-v1",device_model:"test",operating_system_version:"test",camera_position:"front",regions:[],failure_reason_codes_by_pose:{}},wrapped_key:null,objects:[]}' > "$TEST_DIR/progress-init.json"
+  --argjson analysis_version "$EXPECTED_ANALYSIS_VERSION" \
+  '{client_submission_id:$submission,idempotency_key:$idem,consent:{version:"pilot-ongoing-v1",adult_confirmed:true,share_scope:"results_only",accepted_at:$now},results:{schema_version:1,contribution_type:"progress_scan",local_session_id:$session,session_result:"comparable",started_at:$now,completed_at:$now,app_build:"security-test",analysis_version:$analysis_version,threshold_set_identifier:"engineering-v1",device_model:"test",operating_system_version:"test",camera_position:"front",regions:[],failure_reason_codes_by_pose:{}},wrapped_key:null,objects:[]}' > "$TEST_DIR/progress-init.json"
 jq '.consent.version="pilot-consent-v1"' "$TEST_DIR/progress-init.json" > "$TEST_DIR/progress-wrong-consent.json"
 expect_status 400 -X POST "${HEADERS[@]}" "${AUTH[@]}" --data-binary "@$TEST_DIR/progress-wrong-consent.json" "$API_BASE/submissions/init"
 curl "${CURL_TIMEOUT[@]}" -sS -X POST "${HEADERS[@]}" "${AUTH[@]}" --data-binary "@$TEST_DIR/progress-init.json" "$API_BASE/submissions/init" > "$TEST_DIR/progress-initialized.json"

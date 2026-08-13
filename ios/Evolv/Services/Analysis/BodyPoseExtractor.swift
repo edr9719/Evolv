@@ -52,7 +52,8 @@ enum BodyPoseExtractor {
 
         guard let bodyHeightPx = computeObservedBodyHeight(
             landmarks: landmarks,
-            imageHeight: Float(cgImage.height)
+            imageHeight: Float(cgImage.height),
+            pose: pose
         ) else {
             throw ExtractionError.insufficientLandmarks
         }
@@ -126,8 +127,18 @@ enum BodyPoseExtractor {
 
     private static func computeObservedBodyHeight(
         landmarks: [NormalizedLandmark],
-        imageHeight: Float
+        imageHeight: Float,
+        pose: Pose
     ) -> Float? {
+        if pose == .legs {
+            let hips = landmarks.filter { ["leftHip", "rightHip"].contains($0.joint) }
+            let ankles = landmarks.filter { ["leftAnkle", "rightAnkle"].contains($0.joint) }
+            guard !hips.isEmpty, !ankles.isEmpty else { return nil }
+            let upperY = hips.map(\.y).min() ?? 0
+            let lowerY = ankles.map(\.y).max() ?? 0
+            let observedHeight = abs(lowerY - upperY) * imageHeight
+            return observedHeight >= 1 ? observedHeight : nil
+        }
         let shoulders = landmarks.filter { ["leftShoulder", "rightShoulder"].contains($0.joint) }
         let hips = landmarks.filter { ["leftHip", "rightHip"].contains($0.joint) }
         guard !shoulders.isEmpty, !hips.isEmpty else { return nil }

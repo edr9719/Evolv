@@ -42,6 +42,7 @@ struct TimerCameraView: View {
     @Environment(\.dismiss) private var dismiss
     let pose: Pose
     let previousPhoto: UIImage?
+    let previousMetadata: CaptureCameraMetadata?
     let allowsCameraSwitch: Bool
     let onCaptured: (CameraCaptureResult) -> Void
 
@@ -61,12 +62,14 @@ struct TimerCameraView: View {
     init(
         pose: Pose,
         previousPhoto: UIImage? = nil,
+        previousMetadata: CaptureCameraMetadata? = nil,
         preferredPosition: CaptureCameraPosition? = nil,
         allowsCameraSwitch: Bool = true,
         onCaptured: @escaping (CameraCaptureResult) -> Void
     ) {
         self.pose = pose
         self.previousPhoto = previousPhoto
+        self.previousMetadata = previousMetadata
         self.allowsCameraSwitch = allowsCameraSwitch
         self.onCaptured = onCaptured
         _camera = StateObject(
@@ -75,7 +78,7 @@ struct TimerCameraView: View {
                 requiresExactPosition: !allowsCameraSwitch
             )
         )
-        _showPreviousOverlay = State(initialValue: previousPhoto != nil)
+        _showPreviousOverlay = State(initialValue: previousPhoto != nil && previousMetadata != nil)
     }
 
     var body: some View {
@@ -83,24 +86,14 @@ struct TimerCameraView: View {
             ZStack {
                 Color.black.ignoresSafeArea()
             
-                CameraPreviewView(
+                CameraCompositePreview(
                     session: camera.session,
-                    isMirrored: camera.activePosition == .front
+                    isMirrored: camera.activePosition == .front,
+                    referenceImage: referenceOverlayIsCompatible ? previousPhoto : nil,
+                    showsReference: showPreviousOverlay && referenceOverlayIsCompatible
                 )
                     .ignoresSafeArea()
                     .opacity(camera.isReady ? 1 : 0)
-
-                if let previousPhoto, showPreviousOverlay {
-                    Image(uiImage: previousPhoto)
-                        .resizable()
-                        .scaledToFill()
-                        .scaleEffect(x: camera.activePosition == .front ? -1 : 1, y: 1)
-                        .ignoresSafeArea()
-                        .opacity(0.22)
-                        .saturation(0.25)
-                        .allowsHitTesting(false)
-                        .accessibilityHidden(true)
-                }
 
                 // Landmark zones communicate framing without asking the user
                 // to match another person's proportions.
@@ -250,7 +243,7 @@ struct TimerCameraView: View {
 
     private var bottomControls: some View {
         VStack(spacing: 14) {
-            if previousPhoto != nil {
+            if previousPhoto != nil && referenceOverlayIsCompatible {
                 Button {
                     withAnimation(.easeInOut(duration: 0.2)) {
                         showPreviousOverlay.toggle()
@@ -276,6 +269,14 @@ struct TimerCameraView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(isCapturing)
+            } else if previousPhoto != nil && camera.isReady {
+                Label("Previous photo hidden · camera setup differs", systemImage: "eye.slash")
+                    .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.78))
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 8)
+                    .background(Capsule().fill(.black.opacity(0.48)))
+                    .overlay(Capsule().stroke(.white.opacity(0.22), lineWidth: 1))
             }
 
             // Timer chips
@@ -437,6 +438,34 @@ struct TimerCameraView: View {
     private var isCapturing: Bool {
         camera.operationState == .capturing || camera.operationState == .processing
     }
+
+    private var referenceOverlayIsCompatible: Bool {
+        guard let previousMetadata else { return false }
+        return CameraReferencePolicy.canDisplay(
+            reference: previousMetadata,
+            activePosition: camera.activePosition,
+            activeLensType: camera.activeLensType,
+            activeZoomFactor: camera.activeZoomFactor
+        )
+    }
+}
+
+enum CameraReferencePolicy {
+    static func canDisplay(
+        reference: CaptureCameraMetadata,
+        activePosition: CaptureCameraPosition,
+        activeLensType: String?,
+        activeZoomFactor: Float?
+    ) -> Bool {
+        guard let activeLensType,
+              reference.position == activePosition,
+              reference.lensType == activeLensType,
+              reference.normalizedOrientation == .up else { return false }
+        if let referenceZoom = reference.zoomFactor, let activeZoomFactor {
+            return abs(referenceZoom - activeZoomFactor) <= 0.01
+        }
+        return reference.zoomFactor == nil
+    }
 }
 
 // MARK: - Landmark alignment guide
@@ -572,6 +601,8 @@ final class CameraController: NSObject, ObservableObject, AVCapturePhotoCaptureD
     @Published var isReady: Bool = false
     @Published private(set) var operationState: CameraOperationState = .preparing
     @Published private(set) var activePosition: CaptureCameraPosition
+    @Published private(set) var activeLensType: String?
+    @Published private(set) var activeZoomFactor: Float?
 
     private struct PendingCapture {
         let handler: (CameraCaptureResult?) -> Void
@@ -670,6 +701,8 @@ final class CameraController: NSObject, ObservableObject, AVCapturePhotoCaptureD
             let publicPosition = Self.capturePosition(for: nextPosition)
             DispatchQueue.main.async {
                 self.activePosition = publicPosition
+                self.activeLensType = input.device.deviceType.rawValue
+                self.activeZoomFactor = Float(input.device.videoZoomFactor)
                 self.isReady = self.session.isRunning
                 CameraPreferenceStore.save(publicPosition)
             }
@@ -686,13 +719,17 @@ final class CameraController: NSObject, ObservableObject, AVCapturePhotoCaptureD
         let lensType = queue.sync {
             currentInput?.device.deviceType.rawValue ?? "unknown"
         }
+        let zoomFactor = queue.sync {
+            currentInput.map { Float($0.device.videoZoomFactor) }
+        }
         let metadata = CaptureCameraMetadata(
             position: position,
             lensType: lensType,
             previewMirrored: position == .front,
             outputMirrored: false,
             sourceOrientation: .up,
-            normalizedOrientation: .up
+            normalizedOrientation: .up,
+            zoomFactor: zoomFactor
         )
         handlerLock.lock()
         pendingCapture = PendingCapture(handler: handler, metadata: metadata)
@@ -754,6 +791,8 @@ final class CameraController: NSObject, ObservableObject, AVCapturePhotoCaptureD
             let publicPosition = Self.capturePosition(for: input.device.position)
             DispatchQueue.main.async {
                 self.activePosition = publicPosition
+                self.activeLensType = input.device.deviceType.rawValue
+                self.activeZoomFactor = Float(input.device.videoZoomFactor)
                 self.isReady = self.session.isRunning
                 self.operationState = self.session.isRunning
                     ? .ready
@@ -845,34 +884,89 @@ final class CameraController: NSObject, ObservableObject, AVCapturePhotoCaptureD
     }
 }
 
-// MARK: - Preview
+// MARK: - Preview and reference overlay
 
-struct CameraPreviewView: UIViewRepresentable {
+/// The live camera and previous-photo ghost share one UIKit-backed viewport.
+/// This ensures both use identical aspect-fill bounds and the same center-based
+/// mirroring transform instead of two independently cropped SwiftUI images.
+struct CameraCompositePreview: UIViewRepresentable {
     let session: AVCaptureSession
     let isMirrored: Bool
+    let referenceImage: UIImage?
+    let showsReference: Bool
 
-    func makeUIView(context: Context) -> PreviewView {
-        let v = PreviewView()
-        v.videoPreviewLayer.session = session
-        v.videoPreviewLayer.videoGravity = .resizeAspectFill
-        updateMirroring(on: v.videoPreviewLayer)
-        return v
+    func makeUIView(context: Context) -> CompositePreviewView {
+        let view = CompositePreviewView()
+        view.configure(
+            session: session,
+            isMirrored: isMirrored,
+            referenceImage: referenceImage,
+            showsReference: showsReference
+        )
+        return view
     }
 
-    func updateUIView(_ uiView: PreviewView, context: Context) {
-        updateMirroring(on: uiView.videoPreviewLayer)
+    func updateUIView(_ uiView: CompositePreviewView, context: Context) {
+        uiView.configure(
+            session: session,
+            isMirrored: isMirrored,
+            referenceImage: referenceImage,
+            showsReference: showsReference
+        )
     }
 
-    private func updateMirroring(on layer: AVCaptureVideoPreviewLayer) {
-        guard let connection = layer.connection,
-              connection.isVideoMirroringSupported else { return }
-        connection.automaticallyAdjustsVideoMirroring = false
-        connection.isVideoMirrored = isMirrored
-    }
+    final class CompositePreviewView: UIView {
+        let videoPreviewLayer = AVCaptureVideoPreviewLayer()
+        private let referenceLayer = CALayer()
+        private var isMirrored = false
 
-    final class PreviewView: UIView {
-        override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
-        var videoPreviewLayer: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            clipsToBounds = true
+            videoPreviewLayer.videoGravity = .resizeAspectFill
+            layer.addSublayer(videoPreviewLayer)
+            referenceLayer.contentsGravity = .resizeAspectFill
+            referenceLayer.opacity = 0.22
+            referenceLayer.masksToBounds = true
+            layer.addSublayer(referenceLayer)
+        }
+
+        required init?(coder: NSCoder) { nil }
+
+        func configure(
+            session: AVCaptureSession,
+            isMirrored: Bool,
+            referenceImage: UIImage?,
+            showsReference: Bool
+        ) {
+            videoPreviewLayer.session = session
+            self.isMirrored = isMirrored
+            referenceLayer.contents = referenceImage?.cgImage
+            referenceLayer.isHidden = !showsReference || referenceImage == nil
+            setNeedsLayout()
+            updateMirroring()
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            videoPreviewLayer.frame = bounds
+            referenceLayer.bounds = bounds
+            referenceLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
+            referenceLayer.transform = isMirrored
+                ? CATransform3DMakeScale(-1, 1, 1)
+                : CATransform3DIdentity
+            CATransaction.commit()
+            updateMirroring()
+        }
+
+        private func updateMirroring() {
+            guard let connection = videoPreviewLayer.connection,
+                  connection.isVideoMirroringSupported else { return }
+            connection.automaticallyAdjustsVideoMirroring = false
+            connection.isVideoMirrored = isMirrored
+        }
     }
 }
 

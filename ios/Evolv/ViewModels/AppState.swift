@@ -6,11 +6,20 @@ final class AppState {
     enum PersistenceError: LocalizedError {
         case couldNotEncode
         case couldNotSave
+        case captureRecipeMismatch
+        case cameraRequiredForNewBaseline
+        case couldNotUpdateBackupPolicy
 
         var errorDescription: String? {
             switch self {
             case .couldNotEncode: return "Evolv couldn't prepare the updated scan."
             case .couldNotSave: return "Evolv couldn't save the updated scan to this device."
+            case .captureRecipeMismatch:
+                return "This camera setup does not match your saved capture recipe. Start a new baseline setup or save the photos without analysis."
+            case .cameraRequiredForNewBaseline:
+                return "A new baseline setup requires front, side, and back photos taken with the same in-app camera."
+            case .couldNotUpdateBackupPolicy:
+                return "Evolv couldn't update the Apple backup preference. Your previous setting is unchanged."
             }
         }
     }
@@ -23,6 +32,12 @@ final class AppState {
 
     // Analysis state — not persisted in state.json; AnalysisStore owns the JSON files
     var latestAnalysis: ScanAnalysis? = nil
+    /// Cached exact baseline-to-latest evidence for Home. Timeline custom
+    /// comparisons are still calculated only when the selected pair changes.
+    var latestPairComparison: ScanPairComparison? = nil
+    /// Cached baseline-referenced history. A repeated pattern requires two
+    /// uninterrupted supported observations; scan count alone is insufficient.
+    var longitudinalVisualSummary: LongitudinalVisualSummary? = nil
     var analysisPending: Bool = false
 
     // Persisted under Documents/state.json
@@ -33,32 +48,36 @@ final class AppState {
 
     init() {
         load()
+        let migratedRecipe = migrateLegacyCaptureRecipeIfPossible()
+        try? DeviceBackupPolicy.setLocalOnly(profile.usesLocalOnlyStorage)
+        if migratedRecipe { try? persist(scans: scans) }
         validationSessions = (try? ValidationStudyStore.load()) ?? []
         refreshValidationSessionEligibility()
         protectExistingData()
         PurchaseService.shared.bind(to: profile)
         // Re-run canonical scans when evidence rules change; otherwise load the
         // most recent analysis from disk without blocking launch.
-        if let firstOutdated = canonicalScans.first(where: { AnalysisStore.needsReanalysis(scanId: $0.id) }) {
+        if let firstOutdated = activeCanonicalScans.first(where: { AnalysisStore.needsReanalysis(scanId: $0.id) }) {
             analyzeCanonicalScans(startingAt: firstOutdated.date)
-        } else if let latestScanId = canonicalScans.last?.id {
+        } else if let latestScanId = activeLatestScan?.id {
             Task { @MainActor [weak self] in
                 let analysis = await Task.detached(priority: .background) {
                     AnalysisStore.load(scanId: latestScanId)
                 }.value
                 self?.latestAnalysis = analysis
+                self?.refreshLatestPairComparison()
             }
         }
     }
 
     var calibrationState: CalibrationState {
         guard let analysis = latestAnalysis, analysis.analysisVersion >= AnalysisStore.currentAnalysisVersion else {
-            return canonicalScans.isEmpty ? .noScans : .baselineSet
+            return activeCanonicalScans.isEmpty ? .noScans : .baselineSet
         }
         return CalibrationState.from(
             tier: analysis.smoothedSignals.reliabilityTier,
             confidence: analysis.confidence.overall,
-            scanCount: canonicalScans.count
+            scanCount: activeCanonicalScans.count
         )
     }
 
@@ -91,6 +110,15 @@ final class AppState {
     }
     var latestScan: Scan? { canonicalScans.last }
     var firstScan: Scan? { canonicalScans.first }
+    var activeCaptureRecipe: CaptureRecipe? { profile.captureRecipe }
+    var activeCanonicalScans: [Scan] {
+        guard let recipeID = activeCaptureRecipe?.id else { return canonicalScans }
+        return canonicalScans.filter { $0.captureRecipeID == recipeID }
+    }
+    var activeBaselineScan: Scan? {
+        activeCanonicalScans.first
+    }
+    var activeLatestScan: Scan? { activeCanonicalScans.last }
     var latestStoredScan: Scan? { sortedScans.last }
     var latestValidationSession: ValidationStudySession? {
         validationSessions.max { $0.startedAt < $1.startedAt }
@@ -104,6 +132,72 @@ final class AppState {
     var hasAnyScans: Bool { !scans.isEmpty }
 
     func scan(id: UUID) -> Scan? { scans.first { $0.id == id } }
+
+    /// Returns evidence for exactly the two canonical scans selected by the
+    /// user. The result is derived locally and does not replace the canonical
+    /// baseline-to-current analysis stored for either scan.
+    func comparison(beforeID: UUID?, afterID: UUID?) -> ScanPairComparison? {
+        guard let beforeID, let afterID,
+              let before = scan(id: beforeID), let after = scan(id: afterID) else { return nil }
+        return ScanPairComparisonEngine.compare(
+            before: before,
+            after: after,
+            beforeAnalysis: AnalysisStore.load(scanId: before.id),
+            afterAnalysis: AnalysisStore.load(scanId: after.id)
+        )
+    }
+
+    func comparisonNarrative(
+        for comparison: ScanPairComparison?,
+        pose: Pose? = nil
+    ) -> ComparisonNarrative {
+        ComparisonNarrativeEngine.make(
+            comparison: comparison,
+            pose: pose,
+            goal: profile.goal
+        )
+    }
+
+    var currentProgressNarrative: ComparisonNarrative? {
+        guard activeCanonicalScans.count >= 2, let latestPairComparison else { return nil }
+        return comparisonNarrative(for: latestPairComparison)
+    }
+
+    var currentLongitudinalNarrative: LongitudinalPatternNarrative? {
+        LongitudinalVisualEngine.narrative(for: longitudinalVisualSummary)
+    }
+
+    func measurement(for scanID: UUID) -> Measurement? {
+        MeasurementSignalEngine.measurement(for: scanID, in: measurements)
+    }
+
+    func measurementComparison(
+        beforeID: UUID?,
+        afterID: UUID?,
+        visualComparison: ScanPairComparison? = nil
+    ) -> ScanPairMeasurementComparison? {
+        guard let beforeID, let afterID,
+              scan(id: beforeID) != nil, scan(id: afterID) != nil else { return nil }
+        return MeasurementSignalEngine.compare(
+            beforeScanID: beforeID,
+            afterScanID: afterID,
+            measurements: measurements,
+            visualComparison: visualComparison
+        )
+    }
+
+    var currentMeasurementComparison: ScanPairMeasurementComparison? {
+        guard activeCanonicalScans.count >= 2 else { return nil }
+        return measurementComparison(
+            beforeID: activeBaselineScan?.id,
+            afterID: activeLatestScan?.id,
+            visualComparison: latestPairComparison
+        )
+    }
+
+    func baselineScan(for recipeID: UUID?) -> Scan? {
+        canonicalScans.first { $0.captureRecipeID == recipeID }
+    }
 
     func canonicalScan(on date: Date, calendar: Calendar = .current) -> Scan? {
         canonicalScans.last { calendar.isDate($0.date, inSameDayAs: date) }
@@ -136,7 +230,7 @@ final class AppState {
                 direction: .forward
             )
         case .biweekly:
-            let anchor = latestScan?.date ?? today
+            let anchor = activeLatestScan?.date ?? today
             return calendar.date(byAdding: .day, value: 14, to: calendar.startOfDay(for: anchor))
         case .monthly:
             let base = calendar.date(byAdding: .month, value: 1, to: today) ?? today
@@ -148,17 +242,17 @@ final class AppState {
 
     /// Weeks tracked from first scan to today (min 0).
     var weeksTracked: Int {
-        guard let first = firstScan?.date else { return 0 }
+        guard let first = activeBaselineScan?.date else { return 0 }
         return max(0, Calendar.current.dateComponents([.weekOfYear], from: first, to: Date()).weekOfYear ?? 0)
     }
 
     var daysSinceLastScan: Int {
-        guard let d = latestScan?.date else { return 0 }
+        guard let d = activeLatestScan?.date else { return 0 }
         return Calendar.current.dateComponents([.day], from: d, to: Date()).day ?? 0
     }
 
     var currentStreak: Int {
-        guard !canonicalScans.isEmpty else { return 0 }
+        guard !activeCanonicalScans.isEmpty else { return 0 }
         let cal = Calendar.current
         let bucket: Calendar.Component = {
             switch profile.cadence {
@@ -167,7 +261,7 @@ final class AppState {
             case .monthly: return .month
             }
         }()
-        let sorted = canonicalScans.map { $0.date }.sorted(by: >)
+        let sorted = activeCanonicalScans.map { $0.date }.sorted(by: >)
         var streak = 1
         var cursor = sorted[0]
         let step = profile.cadence == .biweekly ? 2 : 1
@@ -193,10 +287,10 @@ final class AppState {
     // MARK: - Progress score (data-driven)
 
     var progressScore: ProgressScore {
-        guard !canonicalScans.isEmpty else {
+        guard !activeCanonicalScans.isEmpty else {
             return ProgressScore(value: 0, monthlyDelta: 0, weeklyDelta: 0, momentum: "Awaiting baseline")
         }
-        guard canonicalScans.count > 1 else {
+        guard activeCanonicalScans.count > 1 else {
             return ProgressScore(value: 0, monthlyDelta: 0, weeklyDelta: 0, momentum: "Baseline set")
         }
         guard let analysis = latestAnalysis,
@@ -212,69 +306,23 @@ final class AppState {
         )
     }
 
-    // MARK: - Estimated deltas (data-driven, honest)
-
-    var estimatedDeltas: [EstimatedDelta] {
-        // Need baseline + recent measurement, otherwise return informational placeholders
-        guard let baseline = measurements.first, measurements.count >= 2,
-              let latest = measurements.last else { return [] }
-
-        func delta(_ a: Double?, _ b: Double?) -> Double? {
-            guard let a, let b else { return nil }
-            return b - a
-        }
-
-        var out: [EstimatedDelta] = []
-        if let d = delta(baseline.arms, latest.arms) {
-            out.append(makeDelta(label: "Arms", unit: "cm", value: d, goalDirection: .up))
-        }
-        if let d = delta(baseline.chest, latest.chest) {
-            out.append(makeDelta(label: "Chest", unit: "cm", value: d, goalDirection: .up))
-        }
-        if let d = delta(baseline.waist, latest.waist) {
-            let dir: GoalDir = (profile.goal == .muscleGain || profile.goal == .maintain) ? .neutral : .down
-            out.append(makeDelta(label: "Waist", unit: "cm", value: d, goalDirection: dir))
-        }
-        if let d = delta(baseline.thighs, latest.thighs) {
-            out.append(makeDelta(label: "Thighs (measurement)", unit: "cm", value: d, goalDirection: .up))
-        }
-        return out
-    }
-
-    private enum GoalDir { case up, down, neutral }
-
-    private func makeDelta(label: String, unit: String, value: Double, goalDirection: GoalDir) -> EstimatedDelta {
-        let rounded = (value * 10).rounded() / 10
-        let mag = abs(rounded)
-        if mag < 0.2 {
-            return EstimatedDelta(label: label, unit: unit, value: rounded, status: .stable, note: "No meaningful change detected")
-        }
-        let status: TrendStatus
-        switch goalDirection {
-        case .up:      status = rounded > 0 ? .improving : .stalled
-        case .down:    status = rounded < 0 ? .improving : .stalled
-        case .neutral: status = mag > 1.5 ? .stalled : .stable
-        }
-        return EstimatedDelta(label: label, unit: unit, value: rounded, status: status, note: nil)
-    }
-
     // MARK: - Weekly AI summary (data-driven, honest)
 
     var weeklySummary: WeeklySummary {
-        if canonicalScans.isEmpty {
+        if activeCanonicalScans.isEmpty {
             return WeeklySummary(
                 headline: "Capture your first scan to begin.",
                 detail: "Your first scan becomes the baseline Evolv quietly compares everything against.",
                 confidence: .low
             )
         }
-        if canonicalScans.count == 1 {
-            let unavailable = latestScan?.recommendedRepairPoses ?? []
+        if activeCanonicalScans.count == 1 {
+            let recommended = activeLatestScan?.recommendedRepairPoses ?? []
             let detail: String
-            if unavailable.isEmpty {
+            if recommended.isEmpty {
                 detail = "No progress result is calculated from one scan. Capture another complete upper-body scan to create a comparison."
             } else {
-                detail = "Your baseline is saved. Automatic checks were unavailable for \(poseList(unavailable)); this does not mean those photos are poor."
+                detail = "Your baseline is saved. Evolv detected a specific capture issue in \(poseList(recommended)); review those photos before the next comparison."
             }
             return WeeklySummary(
                 headline: "Baseline captured.",
@@ -306,16 +354,35 @@ final class AppState {
         }
 
         if analysis.analysisAvailability == .partialEvidence || analysis.analysisAvailability == .processingFailed {
-            let unavailable = latestScan?.recommendedRepairPoses ?? []
+            let recommended = activeLatestScan?.recommendedRepairPoses ?? []
             return WeeklySummary(
                 headline: "Comparison saved with limited automatic analysis.",
-                detail: unavailable.isEmpty
+                detail: recommended.isEmpty
                     ? "Unsupported regions were excluded instead of guessed. Your photos remain saved."
-                    : "Unsupported regions were excluded. You can review \(poseList(unavailable)) without replacing the rest of this scan.",
+                    : "Unsupported regions were excluded. Evolv also detected a specific capture issue in \(poseList(recommended)).",
                 confidence: .low
             )
         }
 
+        if activeCanonicalScans.count >= 3,
+           let longitudinal = currentLongitudinalNarrative {
+            return WeeklySummary(
+                headline: longitudinal.headline,
+                detail: longitudinal.detail + " " + longitudinal.caveat,
+                confidence: longitudinalVisualSummary?.thresholdsValidated == true ? .medium : .low
+            )
+        }
+
+        if let narrative = currentProgressNarrative {
+            let limitation = narrative.limitations.first ?? "Only supported evidence is described."
+            return WeeklySummary(
+                headline: narrative.headline,
+                detail: narrative.detail + " " + limitation,
+                confidence: narrative.evidenceStrength
+            )
+        }
+
+        // Backward-compatible fallback while the exact pair cache is loading.
         if let insight = analysis.generatedInsight {
             return WeeklySummary(
                 headline: insight.headline,
@@ -343,18 +410,56 @@ final class AppState {
     /// Adds a complete scan. Same-day extras are saved for documentation but
     /// are intentionally excluded from progress analysis.
     @discardableResult
-    func addScan(captures: [PoseCapture], role: ScanRole = .canonical) throws -> UUID {
+    func addScan(
+        captures: [PoseCapture],
+        role: ScanRole = .canonical,
+        configurationIntent: CaptureConfigurationIntent = .matchActiveRecipe
+    ) throws -> UUID {
         guard ScanCaptureValidator.hasAllRequiredPoses(captures) else {
             throw PersistenceError.couldNotSave
         }
 
         let now = Date()
+        let requestedRole: ScanRole = configurationIntent == .documentationOnly
+            ? .documentationOnly
+            : role
         let resolvedRole = ScanSchedulingPolicy.resolvedRole(
-            requested: role,
+            requested: requestedRole,
             on: now,
             existingScans: scans
         )
-        let isFirstCanonical = canonicalScans.isEmpty && resolvedRole == .canonical
+        let derivedRecipe = CaptureRecipe.derive(from: captures)
+        var candidateProfile = profile
+        let recipeID: UUID?
+
+        switch configurationIntent {
+        case .matchActiveRecipe:
+            if resolvedRole == .canonical,
+               let active = activeCaptureRecipe,
+               let derivedRecipe,
+               !active.isCompatible(with: derivedRecipe) {
+                throw PersistenceError.captureRecipeMismatch
+            }
+            if let active = activeCaptureRecipe {
+                recipeID = active.id
+            } else if resolvedRole == .canonical, let derivedRecipe {
+                candidateProfile.captureRecipe = derivedRecipe
+                recipeID = derivedRecipe.id
+            } else {
+                recipeID = nil
+            }
+        case .startNewBaseline:
+            guard resolvedRole == .canonical, let derivedRecipe else {
+                throw PersistenceError.cameraRequiredForNewBaseline
+            }
+            candidateProfile.captureRecipe = derivedRecipe
+            recipeID = derivedRecipe.id
+        case .documentationOnly:
+            recipeID = activeCaptureRecipe?.id
+        }
+
+        let isFirstCanonical = resolvedRole == .canonical
+            && !canonicalScans.contains { $0.captureRecipeID == recipeID }
         let scan = Scan(
             date: now,
             captures: captures,
@@ -365,15 +470,19 @@ final class AppState {
             context: nil,
             analysisAvailability: resolvedRole == .canonical
                 ? (isFirstCanonical ? .baselineOnly : .partialEvidence)
-                : (resolvedRole == .sameDayExtra ? .documentationOnly : .validationOnly),
+                : (resolvedRole == .validationAnchor || resolvedRole == .validationRepeat
+                    ? .validationOnly
+                    : .documentationOnly),
             captureCompleteness: .complete,
             scanRole: resolvedRole,
-            lastModifiedAt: now
+            lastModifiedAt: now,
+            captureRecipeID: recipeID
         )
         var candidate = scans
         candidate.append(scan)
-        try persist(scans: candidate)
+        try persist(scans: candidate, profile: candidateProfile)
         scans = candidate
+        profile = candidateProfile
         NotificationManager.sync(with: profile)
 
         if resolvedRole == .canonical { analyzeCanonicalScans(startingAt: scan.date) }
@@ -393,7 +502,9 @@ final class AppState {
         updated.captureCompleteness = ScanCaptureValidator.hasAllRequiredPoses(updated.captures) ? .complete : .incomplete
         updated.lastModifiedAt = Date()
         if updated.isCanonicalProgressScan {
-            updated.analysisAvailability = updated.id == firstScan?.id ? .baselineOnly : .partialEvidence
+            updated.analysisAvailability = updated.id == baselineScan(for: updated.captureRecipeID)?.id
+                ? .baselineOnly
+                : .partialEvidence
         }
 
         var candidate = scans
@@ -431,16 +542,24 @@ final class AppState {
 
     func deleteScan(_ scan: Scan) {
         let candidate = scans.filter { $0.id != scan.id }
-        guard (try? persist(scans: candidate)) != nil else { return }
+        let candidateMeasurements = measurements.map { measurement -> Measurement in
+            guard measurement.scanID == scan.id else { return measurement }
+            var unlinked = measurement
+            unlinked.scanID = nil
+            return unlinked
+        }
+        guard (try? persist(scans: candidate, measurements: candidateMeasurements)) != nil else { return }
         scans = candidate
+        measurements = candidateMeasurements
         PhotoStore.delete(named: scan.captures.map(\.imageFilename))
         AnalysisStore.delete(scanId: scan.id)
         // Update latestAnalysis to the new latest scan's analysis (if any)
-        if let newLatestId = canonicalScans.last?.id {
+        if let newLatestId = activeLatestScan?.id {
             latestAnalysis = AnalysisStore.load(scanId: newLatestId)
         } else {
             latestAnalysis = nil
         }
+        refreshLatestPairComparison()
         NotificationManager.sync(with: profile)
         if scan.isCanonicalProgressScan, let firstRemaining = canonicalScans.first {
             analyzeCanonicalScans(startingAt: firstRemaining.date)
@@ -449,8 +568,28 @@ final class AppState {
     }
 
     func addMeasurement(_ m: Measurement) {
-        measurements.append(m)
-        save()
+        try? upsertMeasurement(m)
+    }
+
+    /// Persists a measurement atomically. A scan can have only one linked
+    /// measurement; editing it replaces the existing record without creating
+    /// duplicate facts for the same scan.
+    func upsertMeasurement(_ measurement: Measurement) throws {
+        var candidate = measurements.filter { existing in
+            if existing.id == measurement.id { return false }
+            if let scanID = measurement.scanID, existing.scanID == scanID { return false }
+            return true
+        }
+        candidate.append(measurement)
+        candidate.sort { $0.date < $1.date }
+        try persist(scans: scans, measurements: candidate)
+        measurements = candidate
+    }
+
+    func deleteMeasurement(id: UUID) throws {
+        let candidate = measurements.filter { $0.id != id }
+        try persist(scans: scans, measurements: candidate)
+        measurements = candidate
     }
 
     func finishOnboarding(initialMeasurement: Measurement?) {
@@ -459,6 +598,20 @@ final class AppState {
         }
         hasCompletedOnboarding = true
         save()
+    }
+
+    func setLocalOnlyStorage(_ enabled: Bool) throws {
+        let previous = profile.usesLocalOnlyStorage
+        do {
+            try DeviceBackupPolicy.setLocalOnly(enabled)
+            var candidateProfile = profile
+            candidateProfile.localOnlyStorageEnabled = enabled
+            try persist(scans: scans, profile: candidateProfile)
+            profile = candidateProfile
+        } catch {
+            try? DeviceBackupPolicy.setLocalOnly(previous)
+            throw PersistenceError.couldNotUpdateBackupPolicy
+        }
     }
 
     func resetAll() {
@@ -475,8 +628,11 @@ final class AppState {
         ValidationStudyStore.deleteAll()
         measurements = []
         profile = UserProfile()
+        try? DeviceBackupPolicy.setLocalOnly(false)
         hasCompletedOnboarding = false
         latestAnalysis = nil
+        latestPairComparison = nil
+        longitudinalVisualSummary = nil
         analysisPending = false
         save()
     }
@@ -497,10 +653,11 @@ final class AppState {
 
     private func persist(
         scans candidateScans: [Scan],
-        measurements candidateMeasurements: [Measurement]? = nil
+        measurements candidateMeasurements: [Measurement]? = nil,
+        profile candidateProfile: UserProfile? = nil
     ) throws {
         let p = Persisted(
-            profile: profile,
+            profile: candidateProfile ?? profile,
             measurements: candidateMeasurements ?? measurements,
             scans: candidateScans,
             hasCompletedOnboarding: hasCompletedOnboarding
@@ -527,6 +684,8 @@ final class AppState {
         scans = []
         measurements = []
         latestAnalysis = nil
+        latestPairComparison = nil
+        longitudinalVisualSummary = nil
         analysisPending = false
     }
 
@@ -550,6 +709,23 @@ final class AppState {
                 ofItemAtPath: Self.stateURL.path
             )
         }
+        try? DeviceBackupPolicy.applyStoredPreference()
+    }
+
+    /// Earlier builds stored camera metadata per photo but had no capture
+    /// recipe. Preserve the existing first-baseline behavior by assigning one
+    /// stable recipe identifier to the existing canonical history. Individual
+    /// mismatched poses are still rejected by the camera-comparability gate.
+    @discardableResult
+    private func migrateLegacyCaptureRecipeIfPossible() -> Bool {
+        guard profile.captureRecipe == nil,
+              let first = canonicalScans.first,
+              let recipe = CaptureRecipe.derive(from: first.captures) else { return false }
+        profile.captureRecipe = recipe
+        for index in scans.indices where scans[index].isCanonicalProgressScan {
+            scans[index].captureRecipeID = recipe.id
+        }
+        return true
     }
 
     // MARK: - Local consistency test
@@ -949,14 +1125,37 @@ final class AppState {
             }
             let finalNewestAnalysis = newestAnalysis
             await MainActor.run {
-                if let latestID = self.latestScan?.id,
+                if let latestID = self.activeLatestScan?.id,
                    let latest = targets.last(where: { $0.id == latestID }) {
                     self.latestAnalysis = AnalysisStore.load(scanId: latest.id) ?? finalNewestAnalysis
-                } else if let latestID = self.latestScan?.id {
+                } else if let latestID = self.activeLatestScan?.id {
                     self.latestAnalysis = AnalysisStore.load(scanId: latestID)
                 }
+                self.refreshLatestPairComparison()
                 self.analysisPending = false
             }
         }
+    }
+
+    private func refreshLatestPairComparison() {
+        let analyses = Dictionary(uniqueKeysWithValues: activeCanonicalScans.compactMap { scan in
+            AnalysisStore.load(scanId: scan.id).map { (scan.id, $0) }
+        })
+        longitudinalVisualSummary = LongitudinalVisualEngine.evaluate(
+            scans: activeCanonicalScans,
+            analyses: analyses
+        )
+        guard let before = activeBaselineScan,
+              let after = activeLatestScan,
+              before.id != after.id else {
+            latestPairComparison = nil
+            return
+        }
+        latestPairComparison = ScanPairComparisonEngine.compare(
+            before: before,
+            after: after,
+            beforeAnalysis: analyses[before.id],
+            afterAnalysis: analyses[after.id]
+        )
     }
 }

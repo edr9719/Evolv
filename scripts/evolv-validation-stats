@@ -2,27 +2,25 @@
 # frozen_string_literal: true
 
 require "csv"
+require "digest"
 require "json"
+require "time"
 
 input = ARGV[0]
 output = ARGV[1]
-abort "Usage: scripts/evolv-validation-stats INPUT.csv [OUTPUT.json]" unless input && File.file?(input)
+review_path = ARGV[2]
+abort "Usage: scripts/evolv-validation-stats INPUT.csv [OUTPUT.json] [SUBGROUP_REVIEW.json]" unless input && File.file?(input)
 
 table = CSV.read(input, headers: true)
 rows = table.map(&:to_h)
 required = %w[
   participant_id split comparison_id region expected_condition result_status
   evidence_strength feature_baseline feature_current pose_match pose_spread
-  body_type skin_tone clothing device environment
+  threshold_set_identifier body_type skin_tone clothing device environment
 ]
 missing = required - (table.headers || [])
 abort "Missing columns: #{missing.join(', ')}" unless missing.empty?
-
-participants_by_split = rows.group_by { |row| row["split"] }.transform_values do |values|
-  values.map { |row| row["participant_id"] }.uniq.sort
-end
-overlap = (participants_by_split["calibration"] || []) & (participants_by_split["heldout"] || [])
-abort "Participants occur in both calibration and heldout: #{overlap.join(', ')}" unless overlap.empty?
+abort "Validation input contains no rows" if rows.empty?
 
 def number(value)
   Float(value)
@@ -46,6 +44,52 @@ def sample_sd(values)
   Math.sqrt(values.sum { |value| (value - average)**2 } / (values.length - 1))
 end
 
+# One-sided Wilson score upper bound over participant clusters. A percentile
+# bootstrap reports an incorrect upper bound of zero when a small study has no
+# observed failures; Wilson remains appropriately cautious in that case.
+def one_sided_wilson_upper(events, trials, z = 1.64485362695147)
+  return 1.0 if trials.zero?
+  proportion = events.to_f / trials
+  denominator = 1.0 + (z**2 / trials)
+  center = proportion + (z**2 / (2.0 * trials))
+  margin = z * Math.sqrt((proportion * (1.0 - proportion) / trials) + (z**2 / (4.0 * trials**2)))
+  [1.0, (center + margin) / denominator].min
+end
+
+allowed = {
+  "split" => %w[calibration heldout],
+  "expected_condition" => %w[stable_exact stable_repeat transformed_valid deliberately_invalid],
+  "result_status" => %w[stable increase decrease unavailable],
+  "evidence_strength" => %w[high medium low]
+}
+allowed.each do |field, values|
+  invalid = rows.map { |row| row[field] }.uniq.reject { |value| values.include?(value) }
+  abort "Invalid #{field}: #{invalid.join(', ')}" unless invalid.empty?
+end
+
+identity_fields = %w[participant_id comparison_id region threshold_set_identifier]
+blank_identity = rows.each_index.select do |index|
+  identity_fields.any? { |field| rows[index][field].to_s.strip.empty? }
+end
+abort "Blank identity field on rows: #{blank_identity.map { |index| index + 2 }.join(', ')}" unless blank_identity.empty?
+
+numeric_fields = %w[feature_baseline feature_current pose_match pose_spread]
+invalid_numbers = rows.each_index.select do |index|
+  numeric_fields.any? { |field| number(rows[index][field]).nil? }
+end
+abort "Invalid numeric field on rows: #{invalid_numbers.map { |index| index + 2 }.join(', ')}" unless invalid_numbers.empty?
+
+duplicate_keys = rows.group_by do |row|
+  [row["participant_id"], row["comparison_id"], row["region"]]
+end.select { |_key, values| values.length > 1 }.keys
+abort "Duplicate participant/comparison/region rows: #{duplicate_keys.take(5).inspect}" unless duplicate_keys.empty?
+
+participants_by_split = rows.group_by { |row| row["split"] }.transform_values do |values|
+  values.map { |row| row["participant_id"] }.uniq.sort
+end
+overlap = (participants_by_split["calibration"] || []) & (participants_by_split["heldout"] || [])
+abort "Participants occur in both calibration and heldout: #{overlap.join(', ')}" unless overlap.empty?
+
 stable_condition = lambda do |row|
   %w[stable_exact stable_repeat transformed_valid].include?(row["expected_condition"])
 end
@@ -54,18 +98,19 @@ unavailable = lambda { |row| row["result_status"] == "unavailable" }
 
 calibration = rows.select { |row| row["split"] == "calibration" && stable_condition.call(row) }
 thresholds = calibration.group_by { |row| row["region"] }.transform_values do |values|
-  deltas = values.map do |row|
+  accepted = values.reject { |row| unavailable.call(row) }
+  deltas = accepted.map do |row|
     baseline = number(row["feature_baseline"])
     current = number(row["feature_current"])
-    next unless baseline && current && baseline.positive?
+    next unless baseline&.positive? && current
     ((current - baseline) / baseline).abs
   end.compact
-  accepted = values.reject { |row| unavailable.call(row) }
   {
     "stable_band_p95" => percentile(deltas, 0.95),
-    "pose_match_p05" => percentile(accepted.map { |row| number(row["pose_match"]) }.compact, 0.05),
-    "conflict_limit_p95" => percentile(accepted.map { |row| number(row["pose_spread"]) }.compact, 0.95),
-    "sample_size" => values.length
+    "pose_match_p05" => percentile(accepted.map { |row| number(row["pose_match"]) }, 0.05),
+    "conflict_limit_p95" => percentile(accepted.map { |row| number(row["pose_spread"]) }, 0.95),
+    "sample_size" => accepted.length,
+    "attempted_sample_size" => values.length
   }
 end
 
@@ -73,52 +118,53 @@ heldout = rows.select { |row| row["split"] == "heldout" && stable_condition.call
 clusters = heldout.group_by { |row| row["participant_id"] }.transform_values do |values|
   supported = values.reject { |row| unavailable.call(row) }
   {
-    error_rate: supported.empty? ? 0.0 : supported.count { |row| non_neutral.call(row) }.to_f / supported.length,
-    abstention_rate: values.empty? ? 0.0 : values.count { |row| unavailable.call(row) }.to_f / values.length
+    false_change_event: supported.any? { |row| non_neutral.call(row) },
+    row_error_rate: supported.empty? ? nil : supported.count { |row| non_neutral.call(row) }.to_f / supported.length,
+    abstention_rate: values.count { |row| unavailable.call(row) }.to_f / values.length
   }
 end
 
-cluster_error_rate = mean(clusters.values.map { |value| value[:error_rate] }) || 0.0
-cluster_abstention_rate = mean(clusters.values.map { |value| value[:abstention_rate] }) || 0.0
-rng = Random.new(4_971_904)
-cluster_values = clusters.values
-bootstrap = if cluster_values.empty?
-              []
-            else
-              Array.new(10_000) do
-                sample = Array.new(cluster_values.length) { cluster_values[rng.rand(cluster_values.length)] }
-                mean(sample.map { |value| value[:error_rate] })
-              end
-            end
-error_upper_95 = percentile(bootstrap, 0.95) || 1.0
+cluster_events = clusters.values.count { |value| value[:false_change_event] }
+cluster_error_rate = clusters.empty? ? 1.0 : cluster_events.to_f / clusters.length
+cluster_abstention_rate = mean(clusters.values.map { |value| value[:abstention_rate] }) || 1.0
+error_upper_95 = one_sided_wilson_upper(cluster_events, clusters.length)
 
 evidence = heldout.group_by { |row| row["evidence_strength"] }.transform_values do |values|
   supported = values.reject { |row| unavailable.call(row) }
   {
     "count" => values.length,
     "error_rate" => supported.empty? ? nil : supported.count { |row| non_neutral.call(row) }.to_f / supported.length,
-    "abstention_rate" => values.empty? ? nil : values.count { |row| unavailable.call(row) }.to_f / values.length
+    "abstention_rate" => values.count { |row| unavailable.call(row) }.to_f / values.length
   }
 end
 
-subgroups = %w[body_type skin_tone clothing device environment].to_h do |field|
+ordered_levels = %w[high medium low].map do |level|
+  value = evidence[level]
+  [level, value] if value && value["error_rate"] && value["abstention_rate"]
+end.compact
+strength_orders = ordered_levels.length >= 2 && ordered_levels.each_cons(2).all? do |(_strong_name, strong), (_weak_name, weak)|
+  strong["error_rate"] < weak["error_rate"] &&
+    strong["abstention_rate"] < weak["abstention_rate"]
+end
+
+subgroup_fields = %w[body_type skin_tone clothing device environment]
+subgroups = subgroup_fields.to_h do |field|
   [field, heldout.group_by { |row| row[field] }.transform_values do |values|
     supported = values.reject { |row| unavailable.call(row) }
     {
       "count" => values.length,
       "false_change_rate" => supported.empty? ? nil : supported.count { |row| non_neutral.call(row) }.to_f / supported.length,
-      "abstention_rate" => values.empty? ? nil : values.count { |row| unavailable.call(row) }.to_f / values.length
+      "abstention_rate" => values.count { |row| unavailable.call(row) }.to_f / values.length
     }
   end]
 end
 
 # Bland–Altman is intentionally limited to repeated Evolv normalized features.
-# No tape-measure field is accepted or compared here.
-feature_differences = heldout.map do |row|
-  baseline = number(row["feature_baseline"])
-  current = number(row["feature_current"])
-  current - baseline if baseline && current
-end.compact
+# Tape measurements are external directional corroboration and are never mixed
+# into this calculation.
+feature_differences = heldout.reject { |row| unavailable.call(row) }.map do |row|
+  number(row["feature_current"]) - number(row["feature_baseline"])
+end
 bias = mean(feature_differences)
 sd = sample_sd(feature_differences)
 bland_altman = {
@@ -129,25 +175,54 @@ bland_altman = {
   "upper_95_limit" => bias && sd ? bias + 1.96 * sd : nil
 }
 
-high = evidence["high"]
-lower_levels = %w[medium low].map { |level| evidence[level] }.compact
-strength_orders = high && !lower_levels.empty? && high["error_rate"] && high["abstention_rate"] &&
-  lower_levels.all? do |level|
-    level["error_rate"] && level["abstention_rate"] &&
-      high["error_rate"] < level["error_rate"] && high["abstention_rate"] < level["abstention_rate"]
+maximum_abstention = number(ENV.fetch("EVOLV_MAX_ABSTENTION_RATE", "0.15"))
+abort "EVOLV_MAX_ABSTENTION_RATE must be between zero and one" unless maximum_abstention&.between?(0.0, 1.0)
+total_participants = rows.map { |row| row["participant_id"] }.uniq.length
+input_sha256 = Digest::SHA256.file(input).hexdigest
+heldout_threshold_sets = heldout.map { |row| row["threshold_set_identifier"] }.uniq
+subgroup_data_complete = rows.all? do |row|
+  subgroup_fields.all? { |field| !row[field].to_s.strip.empty? }
+end
+subgroup_diversity_present = subgroup_fields.all? do |field|
+  heldout.map { |row| row[field] }.reject(&:empty?).uniq.length >= 2
+end
+frozen_candidate = heldout_threshold_sets.length == 1 &&
+  heldout_threshold_sets.first.match?(/\A(?:candidate|validated)-[a-z0-9._-]+\z/)
+
+subgroup_review = nil
+if review_path
+  abort "Subgroup review file does not exist: #{review_path}" unless File.file?(review_path)
+  subgroup_review = JSON.parse(File.read(review_path))
+end
+subgroup_review_complete = subgroup_review.is_a?(Hash) &&
+  subgroup_review["schema_version"] == 1 &&
+  subgroup_review["repeatability_input_sha256"] == input_sha256 &&
+  !subgroup_review["reviewer_identifier"].to_s.strip.empty? &&
+  !subgroup_review["notes"].to_s.strip.empty? &&
+  subgroup_review["material_disparity_found"] == false &&
+  begin
+    Time.iso8601(subgroup_review["reviewed_at"].to_s)
+    true
+  rescue ArgumentError
+    false
   end
 
-maximum_abstention = number(ENV.fetch("EVOLV_MAX_ABSTENTION_RATE", "0.15"))
-total_participants = rows.map { |row| row["participant_id"] }.uniq.length
 promotion_gates = {
   "minimum_30_participants" => total_participants >= 30,
+  "calibration_participants_present" => (participants_by_split["calibration"] || []).length >= 10,
   "heldout_participants_present" => clusters.length >= 10,
+  "heldout_used_one_frozen_candidate_threshold_set" => frozen_candidate,
   "false_change_upper_95_at_most_5_percent" => error_upper_95 <= 0.05,
   "unexpected_abstention_at_most_configured_cap" => cluster_abstention_rate <= maximum_abstention,
-  "evidence_strength_orders_error_and_abstention" => !!strength_orders
+  "evidence_strength_orders_error_and_abstention" => !!strength_orders,
+  "subgroup_data_complete" => subgroup_data_complete,
+  "subgroup_diversity_present" => subgroup_diversity_present,
+  "subgroup_review_completed_without_material_disparity" => subgroup_review_complete
 }
 
 report = {
+  "schema_version" => 2,
+  "input_sha256" => input_sha256,
   "participants" => {
     "total" => total_participants,
     "calibration" => (participants_by_split["calibration"] || []).length,
@@ -155,14 +230,17 @@ report = {
     "split_overlap" => overlap
   },
   "derived_threshold_candidates" => thresholds,
+  "heldout_threshold_set_identifiers" => heldout_threshold_sets,
   "heldout_repeatability" => {
+    "participant_false_change_events" => cluster_events,
     "participant_clustered_false_change_rate" => cluster_error_rate,
-    "one_sided_95_upper_bound" => error_upper_95,
+    "one_sided_95_wilson_upper_bound" => error_upper_95,
     "participant_clustered_unexpected_abstention_rate" => cluster_abstention_rate,
     "configured_abstention_cap" => maximum_abstention
   },
   "evidence_strength" => evidence,
   "subgroups" => subgroups,
+  "subgroup_review" => subgroup_review,
   "bland_altman_repeated_evolv_features_only" => bland_altman,
   "promotion_gates" => promotion_gates,
   "promote_to_validated_v1" => promotion_gates.values.all?

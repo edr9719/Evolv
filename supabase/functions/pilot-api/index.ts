@@ -1,11 +1,13 @@
 import {
   authenticateParticipant,
+  CURRENT_ANALYSIS_VERSION,
   deleteParticipantData,
   enforceRateLimit,
   json,
   keyedHash,
   MAX_OBJECT_BYTES,
   MAX_OBJECTS,
+  MINIMUM_SUPPORTED_ANALYSIS_VERSION,
   normalizeCode,
   parseJSON,
   PHOTO_BUCKET,
@@ -76,7 +78,8 @@ async function health(
     status: "ok",
     service: "evolv-pilot",
     schemaVersion: 2,
-    analysisVersion: 5,
+    analysisVersion: CURRENT_ANALYSIS_VERSION,
+    minimumAnalysisVersion: MINIMUM_SUPPORTED_ANALYSIS_VERSION,
     consentVersions: ["pilot-consent-v1", "pilot-ongoing-v1"],
   });
 }

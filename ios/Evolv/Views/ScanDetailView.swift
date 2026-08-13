@@ -9,6 +9,7 @@ struct ScanDetailView: View {
     @State private var showRepairPicker = false
     @State private var repairRequest: CaptureRequest? = nil
     @State private var confirmDelete = false
+    @State private var showMeasurementSheet = false
 
     private var scan: Scan? { app.scan(id: scanID) }
 
@@ -20,6 +21,9 @@ struct ScanDetailView: View {
                     VStack(alignment: .leading, spacing: 22) {
                         header(scan)
                         evidenceCard(scan)
+                        if !scan.isValidationOnlyScan {
+                            measurementCard(scan)
+                        }
                         photoSection(scan)
                         if let analysis = AnalysisStore.load(scanId: scan.id) {
                             PilotProgressContributionCard(scan: scan, analysis: analysis)
@@ -56,6 +60,11 @@ struct ScanDetailView: View {
                 repairPoses: request.poses
             )
         }
+        .sheet(isPresented: $showMeasurementSheet) {
+            LogMeasurementSheet(scanID: scanID, measurementDate: scan?.date)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+        }
         .fullScreenCover(
             isPresented: Binding(
                 get: { galleryIndex != nil },
@@ -75,7 +84,7 @@ struct ScanDetailView: View {
                 }
             }
         } message: {
-            Text("This permanently removes every app photo and analysis record associated with this scan.")
+            Text("This permanently removes every app photo and analysis record associated with this scan. A linked measurement remains in measurement history but will no longer be attached to a scan.")
         }
     }
 
@@ -125,7 +134,7 @@ struct ScanDetailView: View {
                             Text(pose.label)
                                 .font(.system(size: 14, weight: .semibold, design: .rounded))
                                 .foregroundStyle(EvolvTheme.text)
-                            Text(capture?.assessment?.automaticStatusTitle ?? "Automatic check unavailable")
+                            Text(capture?.assessment?.automaticStatusTitle ?? "Could not verify automatically")
                                 .font(.system(size: 12, design: .rounded))
                                 .foregroundStyle(EvolvTheme.textMuted)
                             if let detail = capture?.assessment?.automaticStatusDetail,
@@ -158,6 +167,66 @@ struct ScanDetailView: View {
         }
     }
 
+    private func measurementCard(_ scan: Scan) -> some View {
+        let measurement = app.measurement(for: scan.id)
+        let hasValues = measurement.map { entry in
+            LoggedMeasurementMetric.allCases.contains { $0.value(in: entry) != nil }
+        } ?? false
+        return GlassCard(padding: 18, cornerRadius: 20) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("LOGGED MEASUREMENTS")
+                            .font(.system(size: 10, weight: .semibold, design: .rounded))
+                            .tracking(1.3)
+                            .foregroundStyle(EvolvTheme.accent)
+                        Text(!hasValues
+                             ? "No values are linked to this scan."
+                             : "User-entered values for this scan—not photo estimates.")
+                            .font(.system(size: 11.5, design: .rounded))
+                            .foregroundStyle(EvolvTheme.textMuted)
+                    }
+                    Spacer(minLength: 8)
+                    Button(!hasValues ? "Add" : "Edit") {
+                        showMeasurementSheet = true
+                    }
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundStyle(EvolvTheme.accent)
+                    .buttonStyle(.plain)
+                }
+
+                if let measurement {
+                    ForEach(LoggedMeasurementMetric.allCases) { metric in
+                        if let value = metric.value(in: measurement) {
+                            Divider().overlay(EvolvTheme.stroke)
+                            HStack {
+                                Text(metric.label)
+                                    .font(.system(size: 12.5, weight: .medium, design: .rounded))
+                                    .foregroundStyle(EvolvTheme.text)
+                                Spacer()
+                                Text(formattedMeasurement(value, metric: metric))
+                                    .font(.system(size: 12.5, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(EvolvTheme.textMuted)
+                                    .monospacedDigit()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func formattedMeasurement(_ value: Double, metric: LoggedMeasurementMetric) -> String {
+        if metric.isMass {
+            return UnitFormatter.displayMass(value, unit: app.profile.massUnit)
+        }
+        return UnitFormatter.displayLength(
+            value,
+            unit: app.profile.lengthUnit,
+            fractionDigits: app.profile.lengthUnit == .cm ? 1 : 2
+        )
+    }
+
     private func photoTile(_ capture: PoseCapture) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Group {
@@ -181,8 +250,8 @@ struct ScanDetailView: View {
                     .font(.system(size: 13.5, weight: .semibold, design: .rounded))
                     .foregroundStyle(EvolvTheme.text)
                 Text(capture.pose.category == .showcase
-                     ? "Showcase only"
-                     : (capture.assessment?.automaticStatusTitle ?? "Automatic check unavailable"))
+                     ? "Optional · analyzed against the same pose"
+                     : (capture.assessment?.automaticStatusTitle ?? "Could not verify automatically"))
                     .font(.system(size: 10.5, design: .rounded))
                     .foregroundStyle(EvolvTheme.textMuted)
                     .lineLimit(2)
@@ -201,7 +270,7 @@ struct ScanDetailView: View {
         VStack(spacing: 12) {
             if scan.resolvedRole == .canonical {
                 EvolvPrimaryButton(
-                    title: scan.recommendedRepairPoses.isEmpty ? "Replace selected photos" : "Improve verification",
+                    title: scan.recommendedRepairPoses.isEmpty ? "Replace selected photos" : "Retake warned photos",
                     icon: "camera.fill"
                 ) {
                     showRepairPicker = true
@@ -302,7 +371,7 @@ struct FullscreenScanGallery: View {
                             .foregroundStyle(.white)
                         Text(capture.pose.category == .showcase
                              ? "Showcase photo"
-                             : (capture.assessment?.automaticStatusTitle ?? "Automatic check unavailable"))
+                             : (capture.assessment?.automaticStatusTitle ?? "Could not verify automatically"))
                             .font(.system(size: 12, design: .rounded))
                             .foregroundStyle(.white.opacity(0.7))
                     }

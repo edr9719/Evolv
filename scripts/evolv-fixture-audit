@@ -1,0 +1,67 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "json"
+require "shellwords"
+
+repo = File.expand_path("..", __dir__)
+manifest_path = File.join(repo, "ios/EvolvTests/Fixtures/Public/manifest.json")
+manifest = JSON.parse(File.read(manifest_path))
+abort "Fixture manifest schema must be 2" unless manifest["schemaVersion"] == 2
+abort "Only public generated fixtures may be tracked" unless manifest["consentClassification"] == "public_generated"
+
+expected_poses = %w[
+  front side back frontDoubleBicep sideChest backDoubleBicep mostMuscular
+  relaxedAesthetic legs
+]
+fixtures = manifest.fetch("fixtures")
+poses = fixtures.map { |fixture| fixture.fetch("pose") }
+abort "Fixture poses must be unique and cover all nine poses" unless poses.sort == expected_poses.sort
+
+expected_regions = {
+  "front" => %w[shoulders chest waist],
+  "side" => %w[chest waist],
+  "back" => %w[shoulders waist],
+  # These are the regions supported end-to-end by the tracked public image for
+  # each pose, not every region the engine can theoretically represent.
+  "frontDoubleBicep" => %w[chest waist arms],
+  "sideChest" => %w[chest waist],
+  "backDoubleBicep" => %w[waist arms],
+  "mostMuscular" => %w[shoulders chest waist],
+  "relaxedAesthetic" => %w[chest waist],
+  "legs" => %w[thighs]
+}
+declared_regions = manifest.fetch("expectedRegionsByPose")
+expected_regions.each do |pose, regions|
+  abort "Incorrect expected regions for #{pose}" unless declared_regions[pose]&.sort == regions.sort
+end
+
+required_transforms = %w[
+  orientation_metadata jpeg_0_72 brightness_minus_0_08 contrast_plus_0_08
+  translation_2_percent rotation_minus_2_degrees rotation_plus_2_degrees
+  valid_crop_3_percent scale_minus_8_percent scale_minus_5_percent
+  scale_minus_3_percent scale_plus_3_percent scale_plus_5_percent
+  scale_plus_8_percent
+]
+missing_transforms = required_transforms - manifest.fetch("deterministicTransformations")
+abort "Missing deterministic transformations: #{missing_transforms.join(', ')}" unless missing_transforms.empty?
+abort "Invalid cases are incomplete" unless manifest.fetch("deliberatelyInvalid").sort == %w[crop exposure occlusion pose]
+
+fixtures.each do |fixture|
+  imageset = File.join(repo, "ios/Evolv/Assets.xcassets", "#{fixture.fetch('asset')}.imageset")
+  contents = File.join(imageset, "Contents.json")
+  abort "Missing fixture asset catalog entry: #{fixture.fetch('asset')}" unless File.file?(contents)
+  catalog = JSON.parse(File.read(contents))
+  filenames = catalog.fetch("images").map { |image| image["filename"] }.compact
+  abort "Fixture asset has no image: #{fixture.fetch('asset')}" if filenames.empty?
+  filenames.each do |filename|
+    abort "Missing fixture image: #{filename}" unless File.file?(File.join(imageset, filename))
+  end
+end
+
+tracked_private = `git -C #{repo.shellescape} ls-files 'ios/EvolvTests/Fixtures/Private/*' 'ios/EvolvTests/Fixtures/StagedPrivate/*'`
+  .lines.map(&:strip)
+  .reject { |path| path.end_with?("Private/README.md", "StagedPrivate/.keep") }
+abort "Private fixture became Git-tracked: #{tracked_private.join(', ')}" unless tracked_private.empty?
+
+puts "Public fixture manifest, assets, transformations, region contracts, and private-fixture boundary passed."

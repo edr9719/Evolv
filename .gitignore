@@ -40,5 +40,8 @@ ios/build/analysis-validation/
 
 # Pilot researcher secrets, invite codes, downloads, and decrypted reports
 private/pilot/
+
+# Pseudonymous validation manifests, split locks, and study results
+private/validation/
 supabase/.temp/
 supabase/.branches/

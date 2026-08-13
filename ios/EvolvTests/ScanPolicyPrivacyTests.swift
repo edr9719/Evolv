@@ -42,6 +42,18 @@ final class ScanPolicyPrivacyTests: XCTestCase {
         )
     }
 
+    func testDocumentationOnlyIntentNeverBecomesCanonical() {
+        let date = Date(timeIntervalSince1970: 1_786_089_600)
+        XCTAssertEqual(
+            ScanSchedulingPolicy.resolvedRole(
+                requested: .documentationOnly,
+                on: date,
+                existingScans: []
+            ),
+            .documentationOnly
+        )
+    }
+
     func testThreeSavedRequiredPhotosAreCompleteDespiteUnavailableAutomaticChecks() {
         let captures = Pose.required.map { pose in
             PoseCapture(
@@ -57,6 +69,43 @@ final class ScanPolicyPrivacyTests: XCTestCase {
 
         XCTAssertTrue(ScanCaptureValidator.hasAllRequiredPoses(captures))
         XCTAssertFalse(ScanCaptureValidator.hasComparableUpperBodyEvidence(captures))
+    }
+
+    func testLibraryPhotoStaysInTimelineButCannotEnterAutomaticScaleComparison() {
+        let library = PoseCapture(
+            pose: .front,
+            imageFilename: "library.jpg",
+            avgBrightness: 0.5,
+            aspectRatio: 0.75,
+            captureSource: .photoLibrary
+        )
+        let cameraWithoutMetadata = PoseCapture(
+            pose: .front,
+            imageFilename: "camera.jpg",
+            avgBrightness: 0.5,
+            aspectRatio: 0.75,
+            captureSource: .camera
+        )
+        var legacy = library
+        legacy.captureSource = nil
+        var explicitlyLegacy = library
+        explicitlyLegacy.captureSource = .legacy
+        var camera = cameraWithoutMetadata
+        camera.cameraMetadata = CaptureCameraMetadata(
+            position: .front,
+            lensType: "wide",
+            previewMirrored: true,
+            outputMirrored: false,
+            sourceOrientation: .up,
+            normalizedOrientation: .up,
+            zoomFactor: 1
+        )
+
+        XCTAssertFalse(AnalysisCapturePolicy.isEligibleForAutomaticComparison(library))
+        XCTAssertFalse(AnalysisCapturePolicy.isEligibleForAutomaticComparison(cameraWithoutMetadata))
+        XCTAssertTrue(AnalysisCapturePolicy.isEligibleForAutomaticComparison(camera))
+        XCTAssertTrue(AnalysisCapturePolicy.isEligibleForAutomaticComparison(legacy))
+        XCTAssertTrue(AnalysisCapturePolicy.isEligibleForAutomaticComparison(explicitlyLegacy))
     }
 
     func testTargetedRepairPreservesEveryUnselectedCapture() {
@@ -112,6 +161,29 @@ final class ScanPolicyPrivacyTests: XCTestCase {
         let decoded = try JSONDecoder().decode(UserProfile.self, from: legacyData)
 
         XCTAssertFalse(decoded.usesCloudInsights)
+        XCTAssertNil(decoded.captureRecipe)
+        XCTAssertFalse(decoded.usesLocalOnlyStorage)
+    }
+
+    func testAppleBackupIsDefaultAndLocalOnlyPreferenceIsExplicit() throws {
+        let suiteName = "DeviceBackupPolicyTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("evolv-backup-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        XCTAssertFalse(DeviceBackupPolicy.isLocalOnly(defaults: defaults))
+        try DeviceBackupPolicy.setLocalOnly(true, defaults: defaults, documentsURL: directory)
+        XCTAssertTrue(DeviceBackupPolicy.isLocalOnly(defaults: defaults))
+        XCTAssertEqual(DeviceBackupPolicy.isExcludedFromBackup(at: directory), true)
+
+        try DeviceBackupPolicy.setLocalOnly(false, defaults: defaults, documentsURL: directory)
+        XCTAssertFalse(DeviceBackupPolicy.isLocalOnly(defaults: defaults))
+        XCTAssertEqual(DeviceBackupPolicy.isExcludedFromBackup(at: directory), false)
     }
 
     func testCloudDisabledDoesNotContactInsightService() async {

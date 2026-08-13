@@ -24,7 +24,7 @@ struct CaptureLaunchView: View {
                             Text(capturePageTitle)
                                 .font(.system(size: 28, weight: .semibold, design: .rounded))
                                 .foregroundStyle(EvolvTheme.text)
-                            Text("Three angles. Same room. Same lighting. Same distance. Evolv compares each scan against your baseline.")
+                            Text("Three angles. Match your saved camera, lens, phone spot, feet spot, lighting, and relaxed posture. Evolv only compares scans from the same capture setup.")
                                 .font(.system(size: 14, design: .rounded))
                                 .foregroundStyle(EvolvTheme.textMuted)
                                 .lineSpacing(3)
@@ -36,7 +36,7 @@ struct CaptureLaunchView: View {
                             }
                         }
 
-                        if let last = app.latestScan {
+                        if let last = app.activeLatestScan {
                             GlassCard(padding: 18, cornerRadius: 20) {
                                 VStack(alignment: .leading, spacing: 12) {
                                     Text("LAST SCAN")
@@ -56,7 +56,7 @@ struct CaptureLaunchView: View {
                                                 .foregroundStyle(EvolvTheme.textMuted)
                                         }
                                     }
-                                    Text("Match the same room, lighting, phone height, and distance.")
+                                    Text("Use the same camera and lens. Mark the phone and feet positions, then match lighting, posture, clothing, and time relative to training.")
                                         .font(.system(size: 12, design: .rounded))
                                         .foregroundStyle(EvolvTheme.textMuted)
                                 }
@@ -101,19 +101,19 @@ struct CaptureLaunchView: View {
 
     private var captureButtonTitle: String {
         guard let today = app.todayCanonicalScan else {
-            return app.hasAnyScans ? "Start guided capture" : "Capture baseline"
+            return app.activeCanonicalScans.isEmpty ? "Capture baseline" : "Start guided capture"
         }
         return today.recommendedRepairPoses.isEmpty ? "Today's scan options" : "Improve today's scan"
     }
 
     private var capturePageTitle: String {
         if app.todayCanonicalScan != nil { return "Today's scan is saved" }
-        return app.hasAnyScans ? "Capture your next scan" : "Capture your baseline"
+        return app.activeCanonicalScans.isEmpty ? "Capture your baseline" : "Capture your next scan"
     }
 
     private func lastScanGuidance(_ scan: Scan) -> String {
         if !scan.recommendedRepairPoses.isEmpty {
-            return "The photos are saved; review only the automatic checks that were unavailable."
+            return "The photos are saved; review the poses with a specific lighting warning."
         }
         if scan.analysisAvailability == .baselineOnly {
             return "Your next complete scan creates the first comparison."
@@ -234,6 +234,8 @@ struct CaptureFlowView: View {
 
     // UX state
     @State private var showCancelConfirmation: Bool = false
+    @State private var showCaptureSetupOptions: Bool = false
+    @State private var captureConfigurationIntent: CaptureConfigurationIntent = .matchActiveRecipe
     @State private var justCapturedPose: Pose? = nil
     @State private var resultScanID: UUID? = nil
 
@@ -265,6 +267,10 @@ struct CaptureFlowView: View {
         .animation(.easeInOut(duration: 0.2), value: isAnalyzing)
         .animation(.easeInOut(duration: 0.2), value: justCapturedPose != nil)
         .onAppear {
+            if sessionCameraPosition == nil,
+               captureConfigurationIntent == .matchActiveRecipe {
+                sessionCameraPosition = app.activeCaptureRecipe?.cameraPosition
+            }
             // A force-quit can occur after the third photo was checkpointed
             // but before the set record was committed. Resume by committing
             // that complete draft instead of asking for a duplicate pose.
@@ -279,10 +285,12 @@ struct CaptureFlowView: View {
                 TimerCameraView(
                     pose: pose,
                     previousPhoto: previousImage(for: pose),
+                    previousMetadata: previousCapture(for: pose)?.cameraMetadata,
                     preferredPosition: validationContext?.lockedCameraPosition
                         ?? sessionCameraPosition
+                        ?? matchingRecipe?.cameraPosition
                         ?? previousCapture(for: pose)?.cameraMetadata?.position,
-                    allowsCameraSwitch: !isValidationCapture
+                    allowsCameraSwitch: allowsCameraSwitch(for: pose)
                 ) { result in
                     handleCaptured(
                         image: result.image,
@@ -344,6 +352,28 @@ struct CaptureFlowView: View {
                  : (isRepairing
                     ? "Your original scan will remain unchanged. The \(count) new photo\(count == 1 ? "" : "s") will be deleted."
                     : "You've captured \(count) pose\(count == 1 ? "" : "s"). Discarding will delete this session."))
+        }
+        .confirmationDialog(
+            "Choose a capture setup",
+            isPresented: $showCaptureSetupOptions,
+            titleVisibility: .visible
+        ) {
+            if canStartNewBaseline {
+                Button("Start a new comparison baseline") {
+                    captureConfigurationIntent = .startNewBaseline
+                    sessionCameraPosition = nil
+                }
+            }
+            Button("Save photos only") {
+                captureConfigurationIntent = .documentationOnly
+                sessionCameraPosition = nil
+            }
+            Button("Keep matching current baseline", role: .cancel) {
+                captureConfigurationIntent = .matchActiveRecipe
+                sessionCameraPosition = app.activeCaptureRecipe?.cameraPosition
+            }
+        } message: {
+            Text("Changing the camera or lens breaks scale comparability. Start a new baseline for future analysis, or save this set as photos that will not affect progress results.")
         }
     }
 
@@ -457,6 +487,16 @@ struct CaptureFlowView: View {
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 30)
                 }
+
+                if shouldOfferSetupChange {
+                    Button("Use a different camera setup") {
+                        showCaptureSetupOptions = true
+                    }
+                    .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                    .foregroundStyle(EvolvTheme.textMuted)
+                    .buttonStyle(.plain)
+                    .padding(.top, 2)
+                }
             }
             .padding(.top, standardCaptures.isEmpty ? 18 : 10)
 
@@ -466,13 +506,22 @@ struct CaptureFlowView: View {
                 EvolvPrimaryButton(title: "Take photo", icon: "camera.fill") {
                     showCameraSheet = true
                 }
-                if !isValidationCapture {
-                    Button { showLibraryPicker = true } label: {
-                        Text("Choose from library")
-                            .font(.system(size: 14, weight: .medium, design: .rounded))
-                            .foregroundStyle(EvolvTheme.textMuted)
+                if !isValidationCapture && captureConfigurationIntent != .startNewBaseline {
+                    VStack(spacing: 4) {
+                        Button { showLibraryPicker = true } label: {
+                            Text("Choose from library")
+                                .font(.system(size: 14, weight: .medium, design: .rounded))
+                                .foregroundStyle(EvolvTheme.textMuted)
+                        }
+                        .buttonStyle(.plain)
+                        if matchingRecipe != nil {
+                            Text("Library photos do not include Evolv's saved camera recipe and may be excluded from automatic comparison.")
+                                .font(.system(size: 9.5, design: .rounded))
+                                .foregroundStyle(EvolvTheme.textFaint)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal, 20)
+                        }
                     }
-                    .buttonStyle(.plain)
                 }
 
                 if isShowcase {
@@ -660,7 +709,7 @@ struct CaptureFlowView: View {
                     .frame(width: 28, height: 28)
             }
             VStack(alignment: .leading, spacing: 5) {
-                Text(isAnalyzing ? "Checking photo…" : (pendingAssessment?.automaticStatusTitle ?? "Automatic check unavailable"))
+                Text(isAnalyzing ? "Running pose check…" : (pendingAssessment?.automaticStatusTitle ?? "Could not verify automatically"))
                     .font(.system(size: 15, weight: .semibold, design: .rounded))
                     .foregroundStyle(EvolvTheme.text)
                 Text(isAnalyzing ? "This usually takes a moment." : assessmentMessage)
@@ -700,7 +749,7 @@ struct CaptureFlowView: View {
         }
         switch assessment.status {
         case .ready:
-            return "Required torso framing was verified. Check the pose yourself; any unsupported region will be excluded from analysis."
+            return "Evolv detected the required pose landmarks. This is a capture aid—not proof that two photos are comparable. Check the photo yourself before continuing."
         case .reviewRecommended:
             if assessment.confirmedIssues.contains(.tooDark) {
                 return "The photo is extremely dark, which can hide body contours. Retaking in more light is recommended."
@@ -710,7 +759,7 @@ struct CaptureFlowView: View {
             }
             return "A specific image issue may limit analysis. Review it carefully before continuing."
         case .unavailable:
-            return "Evolv couldn't verify the framing automatically. This does not mean the photo is poor—review it and use it if your upper body is clear."
+            return "Evolv couldn't confirm the pose landmarks. This is common for side profiles and does not mean the photo is poor. Use the checklist and keep it if the pose is clear."
         }
     }
 
@@ -837,9 +886,6 @@ struct CaptureFlowView: View {
         pendingSource = source
         pendingPixelSize = prepared.pixelSize
         pendingCameraMetadata = cameraMetadata
-        if let cameraPosition = cameraMetadata?.position {
-            sessionCameraPosition = cameraPosition
-        }
         pendingAssessment = nil
         assessmentToken = token
         phase = .review
@@ -867,8 +913,8 @@ struct CaptureFlowView: View {
     }
 
     /// The ghost overlay is always loaded from Evolv's on-device photo store.
-    /// Repairs use the photo being replaced; new scans use the canonical
-    /// baseline because the analysis compares against that same reference.
+    /// Repairs use the photo being replaced; matched scans use the baseline
+    /// from the active capture recipe. A new setup never ghosts an old setup.
     /// No reference photo leaves the device.
     private func previousCapture(for pose: Pose) -> PoseCapture? {
         let referenceScan: Scan?
@@ -876,8 +922,10 @@ struct CaptureFlowView: View {
             referenceScan = app.scan(id: anchorScanID)
         } else if let repairScanID {
             referenceScan = app.scan(id: repairScanID)
+        } else if captureConfigurationIntent != .matchActiveRecipe {
+            referenceScan = nil
         } else {
-            referenceScan = app.firstScan
+            referenceScan = app.activeBaselineScan
         }
         return referenceScan?.capture(for: pose)
     }
@@ -891,14 +939,56 @@ struct CaptureFlowView: View {
         if let validationContext {
             return "Using \(validationContext.lockedCameraPosition.label) camera for all five sets."
         }
+        if captureConfigurationIntent == .startNewBaseline {
+            if let position = sessionCameraPosition {
+                return "New baseline setup: \(position.label) camera is locked for all three required poses."
+            }
+            return "Choose the camera once. Evolv will lock it for all three required poses and make this a new baseline."
+        }
+        if captureConfigurationIntent == .documentationOnly {
+            if let position = sessionCameraPosition {
+                return "Photos only: \(position.label) camera is locked within this set. These photos will not affect progress analysis."
+            }
+            return "Photos only: choose a camera once. This set will not affect progress analysis."
+        }
+        if let recipe = matchingRecipe {
+            return "\(recipe.cameraPosition.label) camera and saved lens locked to match your comparison baseline."
+        }
         guard let referencePosition = previousCapture(for: pose)?.cameraMetadata?.position else {
-            return nil
+            if let position = sessionCameraPosition {
+                return "\(position.label) camera locked for all three required poses."
+            }
+            return "Choose the camera once. Evolv will lock it for all three required poses."
         }
         let openingPosition = sessionCameraPosition ?? referencePosition
         if openingPosition == referencePosition {
             return "Camera opens on \(referencePosition.label) to match your reference photo."
         }
         return "This reference used \(referencePosition.label). Switch to \(referencePosition.label) for the closest comparison."
+    }
+
+    private var matchingRecipe: CaptureRecipe? {
+        guard captureConfigurationIntent == .matchActiveRecipe,
+              !isValidationCapture else { return nil }
+        return app.activeCaptureRecipe
+    }
+
+    private var canStartNewBaseline: Bool {
+        !isRepairing && !isValidationCapture && scanRole == .canonical && app.todayCanonicalScan == nil
+    }
+
+    private var shouldOfferSetupChange: Bool {
+        captures.isEmpty
+            && !isRepairing
+            && !isValidationCapture
+            && matchingRecipe != nil
+    }
+
+    private func allowsCameraSwitch(for pose: Pose) -> Bool {
+        if isValidationCapture { return false }
+        if matchingRecipe != nil { return false }
+        if previousCapture(for: pose)?.cameraMetadata != nil { return false }
+        return sessionCameraPosition == nil
     }
 
     private func commitPendingCapture() async {
@@ -927,6 +1017,13 @@ struct CaptureFlowView: View {
                 cameraMetadata: pendingCameraMetadata
             )
             captures.append(capture)
+            // Lock the session only after the user accepts the first photo.
+            // A rejected first attempt may still switch cameras before a
+            // baseline recipe has actually been established.
+            if sessionCameraPosition == nil,
+               let cameraPosition = capture.cameraMetadata?.position {
+                sessionCameraPosition = cameraPosition
+            }
             if let validationContext {
                 do {
                     try app.updateValidationDraft(
@@ -998,7 +1095,7 @@ struct CaptureFlowView: View {
                 ProgressView()
                     .tint(EvolvTheme.accent)
                     .scaleEffect(1.3)
-                Text("Checking photo quality…")
+                Text("Running automatic pose check…")
                     .font(.system(size: 14, weight: .medium, design: .rounded))
                     .foregroundStyle(EvolvTheme.text)
             }
@@ -1086,7 +1183,11 @@ struct CaptureFlowView: View {
                     dismiss()
                     return
                 } else {
-                    resultScanID = try app.addScan(captures: captures, role: scanRole)
+                    resultScanID = try app.addScan(
+                        captures: captures,
+                        role: scanRole,
+                        configurationIntent: captureConfigurationIntent
+                    )
                 }
                 phase = .result
             } catch {
@@ -1116,6 +1217,7 @@ struct CaptureResultView: View {
     @State private var wellHydrated: Bool = false
     @State private var showRepairPicker = false
     @State private var repairRequest: CaptureRequest? = nil
+    @State private var showMeasurementSheet = false
 
     private var scan: Scan? { app.scan(id: scanID) }
 
@@ -1177,7 +1279,7 @@ struct CaptureResultView: View {
                                                 Text(pose.label)
                                                     .font(.system(size: 13.5, weight: .semibold, design: .rounded))
                                                     .foregroundStyle(EvolvTheme.text)
-                                                Text(capture.assessment?.automaticStatusTitle ?? "Automatic check unavailable")
+                                                Text(capture.assessment?.automaticStatusTitle ?? "Could not verify automatically")
                                                     .font(.system(size: 11.5, design: .rounded))
                                                     .foregroundStyle(EvolvTheme.textMuted)
                                             }
@@ -1223,11 +1325,16 @@ struct CaptureResultView: View {
                         Button {
                             showRepairPicker = true
                         } label: {
-                            Text("Improve verification for \(scan.recommendedRepairPoses.count) photo\(scan.recommendedRepairPoses.count == 1 ? "" : "s")")
+                            Text("Review \(scan.recommendedRepairPoses.count) warned photo\(scan.recommendedRepairPoses.count == 1 ? "" : "s")")
                                 .font(.system(size: 14, weight: .semibold, design: .rounded))
                                 .foregroundStyle(EvolvTheme.accent)
                         }
                         .buttonStyle(.plain)
+                    }
+
+                    if let scan, !scan.isValidationOnlyScan {
+                        measurementPrompt(scan)
+                            .padding(.horizontal, 20)
                     }
 
                     EvolvPrimaryButton(title: "Done", icon: "checkmark") {
@@ -1258,6 +1365,11 @@ struct CaptureResultView: View {
                 .presentationDragIndicator(.visible)
             }
         }
+        .sheet(isPresented: $showMeasurementSheet) {
+            LogMeasurementSheet(scanID: scanID, measurementDate: scan?.date)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+        }
         .fullScreenCover(item: $repairRequest) { request in
             CaptureFlowView(
                 scanRole: request.role,
@@ -1271,7 +1383,39 @@ struct CaptureResultView: View {
         guard let scan else { return wasRepair ? "Scan improved" : "Scan complete" }
         if wasRepair { return "Scan improved" }
         if scan.resolvedRole == .sameDayExtra { return "Extra scan saved" }
-        return app.firstScan?.id == scan.id ? "Baseline saved" : "Scan complete"
+        if scan.resolvedRole == .documentationOnly { return "Photos saved" }
+        return app.baselineScan(for: scan.captureRecipeID)?.id == scan.id ? "Baseline saved" : "Scan complete"
+    }
+
+    private func measurementPrompt(_ scan: Scan) -> some View {
+        let hasMeasurement = app.measurement(for: scan.id) != nil
+        return GlassCard(padding: 16, cornerRadius: 20) {
+            HStack(spacing: 13) {
+                Image(systemName: "ruler")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(EvolvTheme.accent)
+                    .frame(width: 32, height: 32)
+                    .background(Circle().fill(EvolvTheme.accentDim))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(hasMeasurement ? "Measurements linked" : "Add measured values (optional)")
+                        .font(.system(size: 13.5, weight: .semibold, design: .rounded))
+                        .foregroundStyle(EvolvTheme.text)
+                    Text(hasMeasurement
+                         ? "Edit the values attached to this scan."
+                         : "Only enter weight or tape values measured with this scan.")
+                        .font(.system(size: 11, design: .rounded))
+                        .foregroundStyle(EvolvTheme.textMuted)
+                        .lineSpacing(2)
+                }
+                Spacer(minLength: 6)
+                Button(hasMeasurement ? "Edit" : "Add") {
+                    showMeasurementSheet = true
+                }
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(EvolvTheme.accent)
+                .buttonStyle(.plain)
+            }
+        }
     }
 
     private func captureThumb(_ c: PoseCapture) -> some View {
@@ -1351,11 +1495,11 @@ struct CaptureResultView: View {
             let poses = scan.recommendedRepairPoses.map(\.shortLabel).joined(separator: ", ")
             return poses.isEmpty
                 ? "Scan saved. Unsupported regions will be marked unavailable, not guessed."
-                : "Baseline saved. Automatic checks were unavailable for \(poses). This does not mean those photos are poor."
+                : "Scan saved. Evolv detected a specific lighting problem in \(poses); unsupported regions will still be omitted instead of guessed."
         case .processingFailed:
             return "The photos are saved, but automatic analysis was unavailable. No progress claim will be generated from missing evidence."
         case .documentationOnly:
-            return "This same-day extra is saved for your timeline and will not influence progress trends."
+            return "These photos are saved for your timeline and will not influence progress trends."
         case .validationOnly:
             return "This consistency-test set stays on this iPhone and will not influence progress trends."
         case .none:

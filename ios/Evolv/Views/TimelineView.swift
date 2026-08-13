@@ -1,5 +1,19 @@
 import SwiftUI
 
+private enum TimelineComparisonMode: String, CaseIterable, Identifiable {
+    case baseline = "Baseline"
+    case previous = "Previous"
+    case custom = "Custom"
+
+    var id: String { rawValue }
+}
+
+private struct TimelineMeasurementRequest: Identifiable {
+    let scanID: UUID
+    let date: Date
+    var id: UUID { scanID }
+}
+
 struct TimelineView: View {
     @Environment(AppState.self) private var app
 
@@ -11,6 +25,9 @@ struct TimelineView: View {
     @State private var showLeftPicker = false
     @State private var showRightPicker = false
     @State private var detailRequest: ScanDetailRequest? = nil
+    @State private var pairComparison: ScanPairComparison? = nil
+    @State private var comparisonMode: TimelineComparisonMode = .baseline
+    @State private var measurementRequest: TimelineMeasurementRequest? = nil
 
     var body: some View {
         Group {
@@ -22,25 +39,45 @@ struct TimelineView: View {
                 .navigationTitle("Timeline")
                 .navigationBarTitleDisplayMode(.inline)
                 .onAppear(perform: defaultSelectionIfNeeded)
+                .onChange(of: app.activeCaptureRecipe?.id) { _, _ in
+                    leftScanID = nil
+                    rightScanID = nil
+                    comparisonMode = .baseline
+                    defaultSelectionIfNeeded()
+                }
+                .onChange(of: app.latestAnalysis?.analyzedAt) { _, _ in
+                    refreshPairComparison()
+                }
                 .fullScreenCover(isPresented: $showFullscreen) {
                     if let left = scan(for: leftScanID), let right = scan(for: rightScanID) {
                         FullscreenComparisonView(left: left, right: right, pose: selectedPose)
                     }
                 }
                 .sheet(isPresented: $showLeftPicker) {
-                    ScanPickerSheet(title: "Before", excluding: rightScanID) { id in
-                        leftScanID = id
-                        sliderPos = 0.5
+                    ScanPickerSheet(
+                        title: "Before",
+                        excluding: rightScanID,
+                        recipeID: app.activeCaptureRecipe?.id
+                    ) { id in
+                        selectScan(id, asBefore: true)
                     }
                 }
                 .sheet(isPresented: $showRightPicker) {
-                    ScanPickerSheet(title: "After", excluding: leftScanID) { id in
-                        rightScanID = id
-                        sliderPos = 0.5
+                    ScanPickerSheet(
+                        title: "After",
+                        excluding: leftScanID,
+                        recipeID: app.activeCaptureRecipe?.id
+                    ) { id in
+                        selectScan(id, asBefore: false)
                     }
                 }
                 .sheet(item: $detailRequest) { request in
                     NavigationStack { ScanDetailView(scanID: request.id) }
+                }
+                .sheet(item: $measurementRequest) { request in
+                    LogMeasurementSheet(scanID: request.scanID, measurementDate: request.date)
+                        .presentationDetents([.medium, .large])
+                        .presentationDragIndicator(.visible)
                 }
             }
         }
@@ -49,9 +86,9 @@ struct TimelineView: View {
 
     @ViewBuilder
     private var content: some View {
-        if app.scans.isEmpty {
+        if app.activeCanonicalScans.isEmpty {
             emptyState
-        } else if app.canonicalScans.count <= 1 {
+        } else if app.activeCanonicalScans.count <= 1 {
             singleScanState
         } else {
             scrollContent
@@ -61,6 +98,9 @@ struct TimelineView: View {
     private var scrollContent: some View {
         ScrollView {
             VStack(spacing: 22) {
+                comparisonModePicker
+                    .padding(.horizontal, 20)
+
                 comparisonHeader
                     .padding(.horizontal, 24)
                     .padding(.top, 4)
@@ -68,7 +108,16 @@ struct TimelineView: View {
                 comparisonCard
                     .padding(.horizontal, 20)
 
+                comparisonNarrativeCard
+                    .padding(.horizontal, 20)
+
+                measurementComparisonCard
+                    .padding(.horizontal, 20)
+
                 poseSelector
+                    .padding(.horizontal, 20)
+
+                comparisonEvidenceCard
                     .padding(.horizontal, 20)
 
                 timelineList
@@ -84,6 +133,29 @@ struct TimelineView: View {
     }
 
     // MARK: - Comparison header
+
+    private var comparisonModePicker: some View {
+        HStack(spacing: 6) {
+            ForEach(TimelineComparisonMode.allCases) { mode in
+                Button {
+                    applyComparisonMode(mode)
+                } label: {
+                    Text(mode.rawValue)
+                        .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                        .foregroundStyle(comparisonMode == mode ? EvolvTheme.background : EvolvTheme.textMuted)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                        .background {
+                            Capsule().fill(comparisonMode == mode ? EvolvTheme.accent : EvolvTheme.surface)
+                                .overlay(Capsule().stroke(comparisonMode == mode ? .clear : EvolvTheme.stroke, lineWidth: 1))
+                        }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Comparison range")
+    }
 
     private var comparisonHeader: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -109,7 +181,8 @@ struct TimelineView: View {
 
     private var headlineForComparison: String {
         guard let l = scan(for: leftScanID), let r = scan(for: rightScanID) else { return "Compare your scans" }
-        if l.id == app.firstScan?.id && r.id == app.latestScan?.id { return "Baseline → today" }
+        if l.id == app.activeBaselineScan?.id && r.id == app.activeLatestScan?.id { return "Baseline → today" }
+        if comparisonMode == .previous { return "Previous → today" }
         return "Side by side"
     }
 
@@ -257,6 +330,38 @@ struct TimelineView: View {
         }
     }
 
+    private var comparisonEvidenceCard: some View {
+        let narrative = app.comparisonNarrative(for: pairComparison, pose: selectedPose)
+        return ComparisonEvidenceCard(
+            comparison: pairComparison,
+            narrative: narrative,
+            pose: selectedPose,
+            analysisIsPending: app.analysisPending
+        )
+    }
+
+    private var comparisonNarrativeCard: some View {
+        ComparisonNarrativeCard(
+            narrative: app.comparisonNarrative(for: pairComparison),
+            analysisIsPending: app.analysisPending
+        )
+    }
+
+    private var measurementComparisonCard: some View {
+        MeasurementComparisonCard(
+            comparison: app.measurementComparison(
+                beforeID: leftScanID,
+                afterID: rightScanID,
+                visualComparison: pairComparison
+            ),
+            beforeScan: scan(for: leftScanID),
+            afterScan: scan(for: rightScanID),
+            onEdit: { scan in
+                measurementRequest = TimelineMeasurementRequest(scanID: scan.id, date: scan.date)
+            }
+        )
+    }
+
     // MARK: - Timeline list
 
     private var timelineList: some View {
@@ -331,7 +436,7 @@ struct TimelineView: View {
     private var singleScanState: some View {
         ScrollView {
             VStack(spacing: 18) {
-                if let scan = app.firstScan, let cap = scan.capture(for: .front) ?? scan.standardCaptures.first {
+                if let scan = app.activeBaselineScan, let cap = scan.capture(for: .front) ?? scan.standardCaptures.first {
                     Button {
                         detailRequest = ScanDetailRequest(id: scan.id)
                     } label: {
@@ -373,7 +478,7 @@ struct TimelineView: View {
                         .foregroundStyle(EvolvTheme.textMuted)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 40)
-                    Text("Tap the baseline to view all \(app.firstScan?.captures.count ?? 0) photos")
+                    Text("Tap the baseline to view all \(app.activeBaselineScan?.captures.count ?? 0) photos")
                         .font(.system(size: 12, weight: .semibold, design: .rounded))
                         .foregroundStyle(EvolvTheme.accent)
                 }
@@ -385,6 +490,29 @@ struct TimelineView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         EvolvSectionHeader(title: "SAME-DAY EXTRAS", trailing: "\(extras.count)")
                         ForEach(extras) { scan in
+                            Button {
+                                detailRequest = ScanDetailRequest(id: scan.id)
+                            } label: {
+                                ScanRow(scan: scan)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.top, 10)
+                }
+
+                let previousSetups = app.canonicalScans
+                    .filter { $0.captureRecipeID != app.activeCaptureRecipe?.id }
+                    .sorted { $0.date > $1.date }
+                if !previousSetups.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        EvolvSectionHeader(title: "PREVIOUS BASELINE SETUPS", trailing: "\(previousSetups.count)")
+                        Text("These scans remain saved, but a different camera recipe keeps them out of the current automatic comparison.")
+                            .font(.system(size: 11.5, design: .rounded))
+                            .foregroundStyle(EvolvTheme.textFaint)
+                            .lineSpacing(2)
+                        ForEach(previousSetups) { scan in
                             Button {
                                 detailRequest = ScanDetailRequest(id: scan.id)
                             } label: {
@@ -415,11 +543,357 @@ struct TimelineView: View {
     }
 
     private func defaultSelectionIfNeeded() {
-        if leftScanID == nil { leftScanID = app.firstScan?.id }
-        if rightScanID == nil { rightScanID = app.latestScan?.id }
+        let activeIDs = Set(app.activeCanonicalScans.map(\.id))
+        if let leftScanID, !activeIDs.contains(leftScanID) { self.leftScanID = nil }
+        if let rightScanID, !activeIDs.contains(rightScanID) { self.rightScanID = nil }
+        if leftScanID == nil || rightScanID == nil {
+            applyComparisonMode(comparisonMode)
+            return
+        }
         // Pick default pose available in both
         let poses = posesAvailableForBothScans()
         if !poses.contains(selectedPose), let first = poses.first { selectedPose = first }
+        refreshPairComparison()
+    }
+
+    private func selectScan(_ id: UUID, asBefore: Bool) {
+        comparisonMode = .custom
+        let selected = scan(for: id)
+        let other = scan(for: asBefore ? rightScanID : leftScanID)
+        if let selected, let other {
+            if selected.date < other.date {
+                leftScanID = selected.id
+                rightScanID = other.id
+            } else {
+                leftScanID = other.id
+                rightScanID = selected.id
+            }
+        } else if asBefore {
+            leftScanID = id
+        } else {
+            rightScanID = id
+        }
+        let poses = posesAvailableForBothScans()
+        if !poses.contains(selectedPose), let first = poses.first { selectedPose = first }
+        sliderPos = 0.5
+        refreshPairComparison()
+    }
+
+    private func applyComparisonMode(_ mode: TimelineComparisonMode) {
+        comparisonMode = mode
+        let active = app.activeCanonicalScans.sorted { $0.date < $1.date }
+        switch mode {
+        case .baseline:
+            leftScanID = active.first?.id
+            rightScanID = active.last?.id
+        case .previous:
+            leftScanID = active.dropLast().last?.id ?? active.first?.id
+            rightScanID = active.last?.id
+        case .custom:
+            if leftScanID == nil { leftScanID = active.first?.id }
+            if rightScanID == nil { rightScanID = active.last?.id }
+        }
+        let poses = posesAvailableForBothScans()
+        if !poses.contains(selectedPose), let first = poses.first { selectedPose = first }
+        sliderPos = 0.5
+        refreshPairComparison()
+    }
+
+    private func refreshPairComparison() {
+        pairComparison = app.comparison(beforeID: leftScanID, afterID: rightScanID)
+    }
+}
+
+// MARK: - Truthful selected-pair evidence
+
+private struct ComparisonEvidenceCard: View {
+    let comparison: ScanPairComparison?
+    let narrative: ComparisonNarrative
+    let pose: Pose
+    let analysisIsPending: Bool
+
+    private var poseComparison: PoseComparison? {
+        comparison?.comparison(for: pose)
+    }
+
+    private var supported: [RegionalComparison] {
+        if pose.category == .standard {
+            return comparison?.relaxedRegions.filter { $0.status != .unavailable } ?? []
+        }
+        return poseComparison?.supportedRegions ?? []
+    }
+
+    var body: some View {
+        GlassCard(padding: 18, cornerRadius: 22) {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: statusIcon)
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(EvolvTheme.accent)
+                        .frame(width: 28, height: 28)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(headline)
+                            .font(.system(size: 16, weight: .semibold, design: .rounded))
+                            .foregroundStyle(EvolvTheme.text)
+                        Text(detail)
+                            .font(.system(size: 12, design: .rounded))
+                            .foregroundStyle(EvolvTheme.textMuted)
+                            .lineSpacing(2)
+                    }
+                    Spacer(minLength: 0)
+                }
+
+                if comparison != nil, !supported.isEmpty {
+                    Divider().overlay(EvolvTheme.stroke)
+                    ForEach(supported, id: \.region) { result in
+                        resultRow(result)
+                    }
+                    HStack {
+                        Text("EVIDENCE STRENGTH")
+                            .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                            .tracking(1.1)
+                            .foregroundStyle(EvolvTheme.textFaint)
+                        Spacer()
+                        Text(narrative.evidenceStrength.label)
+                            .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                            .foregroundStyle(EvolvTheme.accent)
+                    }
+                }
+
+                Text(caveat)
+                    .font(.system(size: 10.5, design: .rounded))
+                    .foregroundStyle(EvolvTheme.textFaint)
+                    .lineSpacing(2)
+            }
+        }
+    }
+
+    private var headline: String {
+        if analysisIsPending { return "Preparing this comparison" }
+        return narrative.headline
+    }
+
+    private var detail: String {
+        if analysisIsPending {
+            return "Evolv is rebuilding local evidence. Your photos remain available while this finishes."
+        }
+        return narrative.detail
+    }
+
+    private var caveat: String {
+        narrative.limitations.joined(separator: " ")
+    }
+
+    private var statusIcon: String {
+        if analysisIsPending { return "hourglass" }
+        guard !supported.isEmpty else { return "viewfinder.circle" }
+        return supported.allSatisfy { $0.status == .stable }
+            ? "equal.circle.fill"
+            : "waveform.path.ecg"
+    }
+
+    private func resultRow(_ result: RegionalComparison) -> some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(color(for: result.status))
+                .frame(width: 7, height: 7)
+            Text(result.region.visualLabel(for: pose.category == .showcase ? pose : nil))
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundStyle(EvolvTheme.text)
+            Spacer(minLength: 8)
+            Text(resultText(result))
+                .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                .foregroundStyle(color(for: result.status))
+        }
+    }
+
+    private func resultText(_ result: RegionalComparison) -> String {
+        switch result.status {
+        case .stable:
+            return "Stable"
+        case .increase:
+            guard let delta = result.normalizedDelta else { return "Increased" }
+            return String(format: "+%.1f%% normalized", abs(delta) * 100)
+        case .decrease:
+            guard let delta = result.normalizedDelta else { return "Decreased" }
+            return String(format: "−%.1f%% normalized", abs(delta) * 100)
+        case .unavailable:
+            return "Unavailable"
+        }
+    }
+
+    private func color(for status: RegionalComparisonStatus) -> Color {
+        switch status {
+        case .stable: return EvolvTheme.accent
+        case .increase, .decrease: return EvolvTheme.stable
+        case .unavailable: return EvolvTheme.textMuted
+        }
+    }
+}
+
+/// The product-level answer for the exact selected pair. The technical
+/// pose-by-pose evidence remains directly below it for inspection.
+private struct ComparisonNarrativeCard: View {
+    let narrative: ComparisonNarrative
+    let analysisIsPending: Bool
+
+    var body: some View {
+        GlassCard(padding: 20, cornerRadius: 24) {
+            VStack(alignment: .leading, spacing: 13) {
+                HStack(spacing: 8) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(EvolvTheme.accent)
+                    Text("EVOLV READ")
+                        .font(.system(size: 10, weight: .semibold, design: .rounded))
+                        .tracking(1.5)
+                        .foregroundStyle(EvolvTheme.textFaint)
+                    Spacer()
+                    Text(narrative.evidenceStrength.label)
+                        .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                        .foregroundStyle(EvolvTheme.accent)
+                }
+
+                Text(analysisIsPending ? "Preparing an exact-pair result" : narrative.headline)
+                    .font(.system(size: 19, weight: .semibold, design: .rounded))
+                    .foregroundStyle(EvolvTheme.text)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text(analysisIsPending
+                     ? "Evolv is rebuilding the local evidence for these scans. No temporary guess is shown."
+                     : narrative.detail)
+                    .font(.system(size: 12.5, design: .rounded))
+                    .foregroundStyle(EvolvTheme.textMuted)
+                    .lineSpacing(2.5)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if !analysisIsPending, let limitation = narrative.limitations.first {
+                    Divider().overlay(EvolvTheme.stroke)
+                    Text(limitation)
+                        .font(.system(size: 10.5, design: .rounded))
+                        .foregroundStyle(EvolvTheme.textFaint)
+                        .lineSpacing(2)
+                }
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Evolv comparison summary")
+    }
+}
+
+/// User-entered weight/tape facts for the exact selected pair. This card is
+/// deliberately separate from EVOLV READ because circumference and normalized
+/// 2D silhouette are different quantities.
+private struct MeasurementComparisonCard: View {
+    let comparison: ScanPairMeasurementComparison?
+    let beforeScan: Scan?
+    let afterScan: Scan?
+    let onEdit: (Scan) -> Void
+
+    private var visibleResults: [LoggedMeasurementComparison] {
+        comparison?.results.filter { $0.beforeValue != nil || $0.afterValue != nil } ?? []
+    }
+
+    var body: some View {
+        GlassCard(padding: 18, cornerRadius: 22) {
+            VStack(alignment: .leading, spacing: 13) {
+                HStack(spacing: 8) {
+                    Image(systemName: "ruler")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(EvolvTheme.accent)
+                    Text("LOGGED MEASUREMENTS")
+                        .font(.system(size: 10, weight: .semibold, design: .rounded))
+                        .tracking(1.4)
+                        .foregroundStyle(EvolvTheme.textFaint)
+                    Spacer()
+                    Text("Exact entries")
+                        .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                        .foregroundStyle(EvolvTheme.accent)
+                }
+
+                Text(summary)
+                    .font(.system(size: 12.5, design: .rounded))
+                    .foregroundStyle(EvolvTheme.textMuted)
+                    .lineSpacing(2)
+
+                if !visibleResults.isEmpty {
+                    Divider().overlay(EvolvTheme.stroke)
+                    ForEach(visibleResults) { result in
+                        if result.status == .unavailable {
+                            unavailableRow(result)
+                        } else {
+                            LoggedMeasurementDeltaRow(result: result)
+                                .padding(.horizontal, -18)
+                        }
+                    }
+                }
+
+                if beforeScan != nil || afterScan != nil {
+                    Divider().overlay(EvolvTheme.stroke)
+                    HStack(spacing: 10) {
+                        if let beforeScan {
+                            editButton(
+                                title: comparison?.beforeMeasurementID == nil ? "Add before" : "Edit before",
+                                scan: beforeScan
+                            )
+                        }
+                        if let afterScan {
+                            editButton(
+                                title: comparison?.afterMeasurementID == nil ? "Add after" : "Edit after",
+                                scan: afterScan
+                            )
+                        }
+                    }
+                }
+
+                Text("Direction agreement is shown only as context. It does not turn a photo silhouette into inches or strengthen automatic visual evidence.")
+                    .font(.system(size: 10.5, design: .rounded))
+                    .foregroundStyle(EvolvTheme.textFaint)
+                    .lineSpacing(2)
+            }
+        }
+    }
+
+    private var summary: String {
+        guard let comparison else {
+            return "Select two scans to compare the values you entered for each one."
+        }
+        if comparison.hasBothMeasurements, !comparison.supportedResults.isEmpty {
+            return "These changes use only the values you entered for the selected before and after scans."
+        }
+        if comparison.hasBothMeasurements {
+            return "Both scans have entries, but no matching value was logged on both sides."
+        }
+        return "Add values to both scans to see a truthful numeric change. Evolv will not match older entries by date or estimate missing values from photos."
+    }
+
+    private func unavailableRow(_ result: LoggedMeasurementComparison) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(result.metric.label)
+                .font(.system(size: 12.5, weight: .medium, design: .rounded))
+                .foregroundStyle(EvolvTheme.text)
+            Text(result.unavailableReason ?? "Not available for both scans.")
+                .font(.system(size: 10.5, design: .rounded))
+                .foregroundStyle(EvolvTheme.textFaint)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 5)
+    }
+
+    private func editButton(title: String, scan: Scan) -> some View {
+        Button { onEdit(scan) } label: {
+            Text(title)
+                .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                .foregroundStyle(EvolvTheme.accent)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 9)
+                .background {
+                    Capsule()
+                        .fill(EvolvTheme.accentDim)
+                        .overlay(Capsule().stroke(EvolvTheme.accent.opacity(0.35), lineWidth: 1))
+                }
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -722,6 +1196,7 @@ struct FullscreenComparisonView: View {
 struct ScanPickerSheet: View {
     let title: String
     let excluding: UUID?
+    let recipeID: UUID?
     let onPick: (UUID) -> Void
     @Environment(AppState.self) private var app
     @Environment(\.dismiss) private var dismiss
@@ -732,7 +1207,7 @@ struct ScanPickerSheet: View {
                 AmbientBackground()
                 ScrollView {
                     LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
-                        ForEach(app.canonicalScans.sorted { $0.date > $1.date }) { scan in
+                        ForEach(app.canonicalScans.filter { $0.captureRecipeID == recipeID }.sorted { $0.date > $1.date }) { scan in
                             if scan.id != excluding {
                                 Button {
                                     onPick(scan.id)

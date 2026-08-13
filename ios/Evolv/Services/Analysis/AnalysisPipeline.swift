@@ -18,6 +18,23 @@ struct AnalysisDependencies {
     )
 }
 
+/// Photo-library items do not expose a trustworthy camera/lens/zoom recipe to
+/// Evolv. They remain fully usable for the private timeline and manual review,
+/// but cannot enter automatic scale comparisons. Nil source is retained only
+/// for pre-metadata legacy scans.
+enum AnalysisCapturePolicy {
+    static func isEligibleForAutomaticComparison(_ capture: PoseCapture) -> Bool {
+        switch capture.captureSource {
+        case .camera:
+            return capture.cameraMetadata != nil
+        case .photoLibrary:
+            return false
+        case .legacy, nil:
+            return true
+        }
+    }
+}
+
 /// Orchestrates on-device visual analysis. Missing evidence remains unavailable;
 /// no stage is permitted to fabricate a landmark, a passing result, or a zero.
 @MainActor
@@ -39,7 +56,10 @@ final class AnalysisPipeline {
         let startedAt = dependencies.clock()
         let scanId = scan.id
         let eligibleDates = Dictionary(uniqueKeysWithValues: allScans
-            .filter(\.isCanonicalProgressScan)
+            .filter { candidate in
+                candidate.isCanonicalProgressScan
+                    && candidate.captureRecipeID == scan.captureRecipeID
+            }
             .map { ($0.id, $0.date) })
         let priorAnalyses = dependencies.loadAnalyses()
             .filter { $0.analysisVersion == AnalysisStore.currentAnalysisVersion }
@@ -48,13 +68,11 @@ final class AnalysisPipeline {
                 return priorDate < scan.date
             }
             .sorted { (eligibleDates[$0.id] ?? .distantPast) < (eligibleDates[$1.id] ?? .distantPast) }
-        let baseline = priorAnalyses.first
-
         var assessments: [Pose: CaptureAssessment] = [:]
         var preparedImages: [Pose: UIImage] = [:]
         var failures: [String: String] = [:]
 
-        for capture in scan.standardCaptures {
+        for capture in scan.captures {
             guard let loaded = dependencies.loadPhoto(capture.imageFilename) else {
                 assessments[capture.pose] = .legacyUnverified()
                 failures[capture.pose.rawValue] = "photo_load_failed"
@@ -74,13 +92,17 @@ final class AnalysisPipeline {
         }
 
         let qualityResult = aggregateQuality(assessments)
-        let cameraMetadata = Dictionary(uniqueKeysWithValues: scan.standardCaptures.compactMap { capture in
+        let cameraMetadata = Dictionary(uniqueKeysWithValues: scan.captures.compactMap { capture in
             capture.cameraMetadata.map { (capture.pose, $0) }
         })
         var extractedPoses: [ExtractedPose] = []
         var silhouetteProfiles: [SilhouetteProfile] = []
 
-        for capture in scan.standardCaptures {
+        for capture in scan.captures {
+            guard AnalysisCapturePolicy.isEligibleForAutomaticComparison(capture) else {
+                failures[capture.pose.rawValue] = "camera_configuration_unknown"
+                continue
+            }
             guard let image = preparedImages[capture.pose] else { continue }
             do {
                 var extracted = try await BodyPoseExtractor.extract(
@@ -88,7 +110,14 @@ final class AnalysisPipeline {
                     pose: capture.pose,
                     scanId: scanId
                 )
-                if let baselinePose = baseline?.extractedPoses.first(where: { $0.pose == capture.pose }) {
+                // Each pose establishes its own earliest baseline. A showcase
+                // pose added later must not be compared against a different
+                // pose or silently discarded because Scan 1 omitted it.
+                if let baselinePose = priorAnalyses
+                    .first(where: { analysis in
+                        analysis.extractedPoses.contains { $0.pose == capture.pose }
+                    })?
+                    .extractedPoses.first(where: { $0.pose == capture.pose }) {
                     extracted.poseMatchScore = NormalizationEngine.computePoseMatchScore(
                         a: extracted,
                         b: baselinePose

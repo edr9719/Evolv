@@ -1,0 +1,110 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "csv"
+require "digest"
+require "json"
+
+input, output = ARGV
+abort "Usage: scripts/evolv-longitudinal-validation INPUT.csv [OUTPUT.json]" unless input && File.file?(input)
+table = CSV.read(input, headers: true)
+required = %w[
+  pseudonymous_subject week scan_id region evolv_direction evolv_feature
+  measurement_1_cm measurement_2_cm measurement_3_cm blinded_measurer
+  measurement_repeatability_error_cm independent_3d_or_contour_reference notes
+]
+missing = required - (table.headers || [])
+abort "Missing columns: #{missing.join(', ')}" unless missing.empty?
+
+def number(value)
+  Float(value)
+rescue ArgumentError, TypeError
+  nil
+end
+
+def median(values)
+  sorted = values.sort
+  sorted[sorted.length / 2]
+end
+
+rows = table.map.with_index do |row, index|
+  values = %w[measurement_1_cm measurement_2_cm measurement_3_cm].map { |field| number(row[field]) }
+  error = number(row["measurement_repeatability_error_cm"])
+  feature = number(row["evolv_feature"])
+  abort "Invalid triplicate measurement on line #{index + 2}" unless values.all? && values.all?(&:positive?)
+  abort "Invalid repeatability error on line #{index + 2}" unless error && error >= 0
+  abort "Invalid Evolv feature on line #{index + 2}" unless feature
+  abort "Invalid Evolv direction on line #{index + 2}" unless %w[increase decrease stable unavailable].include?(row["evolv_direction"])
+  abort "Blinded measurer is missing on line #{index + 2}" if row["blinded_measurer"].to_s.strip.empty?
+  row.to_h.merge(
+    "week_number" => Integer(row["week"]),
+    "measurement_median_cm" => median(values),
+    "measurement_range_cm" => values.max - values.min,
+    "repeatability_error_cm" => error,
+    "feature" => feature
+  )
+rescue ArgumentError
+  abort "Invalid week on line #{index + 2}"
+end
+
+duplicate_rows = rows.group_by do |row|
+  [row["pseudonymous_subject"], row["week_number"], row["region"]]
+end.select { |_key, values| values.length > 1 }
+abort "Duplicate subject/week/region rows are not allowed" unless duplicate_rows.empty?
+
+series = rows.group_by { |row| [row["pseudonymous_subject"], row["region"]] }.map do |(subject, region), values|
+  ordered = values.sort_by { |row| row["week_number"] }
+  weeks = ordered.map { |row| row["week_number"] }.uniq
+  abort "#{subject}/#{region} needs at least 8 distinct weeks" if weeks.length < 8
+  abort "#{subject}/#{region} exceeds the preregistered 12-week validation window" if weeks.length > 12
+  first = ordered.first
+  latest = ordered.last
+  measurement_delta = latest["measurement_median_cm"] - first["measurement_median_cm"]
+  method_error = [first["repeatability_error_cm"], latest["repeatability_error_cm"]].max
+  measurement_direction = if measurement_delta.abs <= method_error
+                            "indeterminate"
+                          elsif measurement_delta.positive?
+                            "increase"
+                          else
+                            "decrease"
+                          end
+  evolv_direction = latest["evolv_direction"]
+  directional_agreement = if measurement_direction == "indeterminate" || evolv_direction == "unavailable"
+                            "not_evaluable"
+                          elsif evolv_direction == "stable"
+                            "not_evaluable"
+                          elsif measurement_direction == evolv_direction
+                            "same_direction"
+                          else
+                            "opposite_direction"
+                          end
+  {
+    "pseudonymous_subject" => subject,
+    "region" => region,
+    "weeks" => weeks.length,
+    "baseline_measurement_median_cm" => first["measurement_median_cm"],
+    "latest_measurement_median_cm" => latest["measurement_median_cm"],
+    "measurement_delta_cm" => measurement_delta,
+    "measurement_method_error_cm" => method_error,
+    "measurement_direction" => measurement_direction,
+    "latest_evolv_direction" => evolv_direction,
+    "directional_agreement" => directional_agreement,
+    "independent_reference_recorded" => values.any? { |row| !row["independent_3d_or_contour_reference"].to_s.strip.empty? }
+  }
+end
+
+evaluable = series.reject { |value| value["directional_agreement"] == "not_evaluable" }
+report = {
+  "schema_version" => 1,
+  "input_sha256" => Digest::SHA256.file(input).hexdigest,
+  "unit_policy" => "Triplicate tape medians provide directional corroboration only; they are not compared with normalized silhouette units.",
+  "series" => series,
+  "summary" => {
+    "series_count" => series.length,
+    "evaluable_directional_series" => evaluable.length,
+    "same_direction" => evaluable.count { |value| value["directional_agreement"] == "same_direction" },
+    "opposite_direction" => evaluable.count { |value| value["directional_agreement"] == "opposite_direction" }
+  }
+}
+rendered = JSON.pretty_generate(report) + "\n"
+output ? File.write(output, rendered) : puts(rendered)

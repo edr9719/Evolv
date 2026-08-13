@@ -9,6 +9,8 @@ struct PrivacySettingsView: View {
     @State private var confirmResetAll = false
     @State private var showManageScans = false
     @State private var showExportSheet = false
+    @State private var confirmLocalOnlyStorage = false
+    @State private var storagePreferenceError: String? = nil
 
     var body: some View {
         ZStack {
@@ -73,13 +75,30 @@ struct PrivacySettingsView: View {
 
                     SettingsGroup(
                         header: "Backup & recovery",
-                        footer: "Apple controls device backups. Removing Evolv from backup can make scans unrecoverable after deleting the app or replacing this iPhone."
+                        footer: "Apple backup is allowed by default. Local-only mode excludes Evolv's local scan and analysis files from future Apple device backups and can make scans unrecoverable if this iPhone is lost, replaced, or erased."
                     ) {
                         VStack(alignment: .leading, spacing: 12) {
                             Text("Scans use Evolv's private app storage. Apple may include that app data in an iCloud or computer backup, depending on your settings.")
                                 .font(.system(size: 12.5, design: .rounded))
                                 .foregroundStyle(EvolvTheme.textMuted)
                                 .lineSpacing(3)
+                            Toggle(isOn: localOnlyStorageBinding) {
+                                HStack(spacing: 12) {
+                                    Image(systemName: app.profile.usesLocalOnlyStorage ? "iphone.and.arrow.forward" : "externaldrive.badge.icloud")
+                                        .font(.system(size: 14, weight: .medium))
+                                        .foregroundStyle(EvolvTheme.text)
+                                        .frame(width: 24)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Keep Evolv data off Apple backups")
+                                            .font(.system(size: 13.5, weight: .semibold, design: .rounded))
+                                            .foregroundStyle(EvolvTheme.text)
+                                        Text(app.profile.usesLocalOnlyStorage ? "Local-only mode" : "Apple backup allowed")
+                                            .font(.system(size: 11.5, design: .rounded))
+                                            .foregroundStyle(EvolvTheme.textMuted)
+                                    }
+                                }
+                            }
+                            .tint(EvolvTheme.accent)
                             Link(destination: URL(string: "https://support.apple.com/108922")!) {
                                 HStack {
                                     Text("How to manage Apple backups")
@@ -162,6 +181,25 @@ struct PrivacySettingsView: View {
         } message: {
             Text("This erases the local profile, scans, measurements, and onboarding. It does not delete pilot data already shared with Evolv; use Pilot data sharing first if you want that deleted too.")
         }
+        .alert("Keep scans only on this iPhone?", isPresented: $confirmLocalOnlyStorage) {
+            Button("Cancel", role: .cancel) {}
+            Button("Use Local-Only Mode", role: .destructive) {
+                updateLocalOnlyStorage(true)
+            }
+        } message: {
+            Text("Evolv will exclude its local scan and analysis files from future Apple device backups. If you delete Evolv or lose this iPhone, these scans may not be recoverable.")
+        }
+        .alert(
+            "Couldn't update storage preference",
+            isPresented: Binding(
+                get: { storagePreferenceError != nil },
+                set: { if !$0 { storagePreferenceError = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) { storagePreferenceError = nil }
+        } message: {
+            Text(storagePreferenceError ?? "Your previous setting is unchanged.")
+        }
         .sheet(isPresented: $showManageScans) {
             ManageScansSheet()
                 .presentationDetents([.large])
@@ -197,7 +235,9 @@ struct PrivacySettingsView: View {
                 privacyBullet("camera", "Your photos stay on this iPhone unless you explicitly choose specific photos to share with Evolv.")
                 privacyBullet("lock", "Scan files use complete protection while your iPhone is locked.")
                 privacyBullet("wifi.slash", "Evolv works offline. Cloud-written wording is optional.")
-                privacyBullet("icloud", "Apple may include app data in device backups, based on your settings.")
+                privacyBullet("icloud", app.profile.usesLocalOnlyStorage
+                              ? "Local-only mode excludes Evolv data from future Apple device backups."
+                              : "Apple may include app data in device backups. You can opt into local-only mode below.")
                 privacyBullet("hand.raised", "Delete anything, anytime, with one tap.")
             }
         }
@@ -220,6 +260,27 @@ struct PrivacySettingsView: View {
                 app.save()
             }
         )
+    }
+
+    private var localOnlyStorageBinding: Binding<Bool> {
+        Binding(
+            get: { app.profile.usesLocalOnlyStorage },
+            set: { enabled in
+                if enabled {
+                    confirmLocalOnlyStorage = true
+                } else {
+                    updateLocalOnlyStorage(false)
+                }
+            }
+        )
+    }
+
+    private func updateLocalOnlyStorage(_ enabled: Bool) {
+        do {
+            try app.setLocalOnlyStorage(enabled)
+        } catch {
+            storagePreferenceError = error.localizedDescription
+        }
     }
 
     private func privacyBullet(_ icon: String, _ text: String) -> some View {

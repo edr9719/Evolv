@@ -139,6 +139,10 @@ device_preflight() {
     print -u2 "The requested iPhone is not connected and available through CoreDevice."
     exit 66
   }
+  jq -e '.info.outcome == "success"' "$details" >/dev/null || {
+    print -u2 "CoreDevice could not inspect the requested iPhone. Reconnect it by cable, unlock it, and wait for Xcode to finish preparing it."
+    exit 66
+  }
   jq -e --arg device_id "$DEVICE_UDID" '
     .result.hardwareProperties.reality == "physical" and
     (
@@ -153,11 +157,13 @@ device_preflight() {
   }
   xcrun devicectl device info lockState --device "$DEVICE_UDID" --timeout 20 --json-output "$lock_state" >/dev/null
   jq -e '
-    .result.passcodeRequired == false or
-    ([.. | strings | ascii_downcase] | any(contains("unlocked"))) or
-    ([paths(scalars) as $p |
-      select(($p[-1] | tostring | ascii_downcase) == "locked") |
-      getpath($p)] | any(. == false))
+    .info.outcome == "success" and
+    (
+      .result.passcodeRequired == false or
+      .result.unlocked == true or
+      .result.isLocked == false or
+      .result.locked == false
+    )
   ' "$lock_state" >/dev/null || {
     print -u2 "Unlock the iPhone before running the Vision plan."
     exit 66

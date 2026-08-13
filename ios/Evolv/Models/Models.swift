@@ -63,7 +63,7 @@ enum Cadence: String, CaseIterable, Identifiable, Codable {
     var description: String {
         switch self {
         case .daily:    return "Best for short challenges or cuts"
-        case .weekly:   return "Recommended — meaningful change shows weekly"
+        case .weekly:   return "Recommended for consistent long-term tracking"
         case .biweekly: return "Lighter cadence, still captures trends"
         case .monthly:  return "Long-term physique documentation"
         }
@@ -82,7 +82,7 @@ enum TrendStatus: String, Codable {
     }
 }
 
-enum Confidence: String, Codable {
+enum Confidence: String, Codable, Hashable {
     case high, medium, low
     var label: String {
         switch self {
@@ -93,7 +93,9 @@ enum Confidence: String, Codable {
     }
 }
 
-/// Pose categories — required for tracking, showcase optional for motivation.
+/// Pose categories — relaxed poses are required; showcase poses are optional.
+/// Optional does not mean ignored: when the same optional pose exists in both
+/// scans, Evolv may produce a separate same-pose visual comparison for it.
 enum PoseCategory: String, Codable { case standard, showcase }
 
 enum Pose: String, CaseIterable, Codable, Identifiable {
@@ -296,8 +298,15 @@ struct UserProfile: Codable {
     /// Cloud-written wording is opt-in. A nil value belongs to a profile saved
     /// before the preference existed and is treated as disabled.
     var cloudInsightsEnabled: Bool? = nil
+    /// The active camera setup used by canonical progress scans. Optional so
+    /// profiles created before capture recipes existed remain decodable.
+    var captureRecipe: CaptureRecipe? = nil
+    /// False/nil keeps Apple's normal device-backup behavior. Enabling this
+    /// excludes Evolv's Documents data from Apple device backups.
+    var localOnlyStorageEnabled: Bool? = nil
 
     var usesCloudInsights: Bool { cloudInsightsEnabled == true }
+    var usesLocalOnlyStorage: Bool { localOnlyStorageEnabled == true }
 
     /// Returns the weekdays the user actually wants reminders on, given cadence.
     var effectiveScanWeekdays: [Int] {
@@ -320,12 +329,17 @@ struct UserProfile: Codable {
 struct Measurement: Identifiable, Codable {
     var id = UUID()
     var date: Date
-    var weightKg: Double
+    /// Nil means the user deliberately skipped weight for this entry. Legacy
+    /// JSON numbers continue to decode unchanged.
+    var weightKg: Double?
     var arms: Double?
     var chest: Double?
     var waist: Double?
     var shoulders: Double?
     var thighs: Double?
+    /// An explicit link to the scan this measurement describes. Older entries
+    /// remain valid trend data, but are not inferred onto a scan by date.
+    var scanID: UUID? = nil
 }
 
 enum CaptureSource: String, Codable, Hashable {
@@ -370,13 +384,78 @@ struct CaptureCameraMetadata: Codable, Hashable {
     var outputMirrored: Bool
     var sourceOrientation: CaptureImageOrientation
     var normalizedOrientation: CaptureImageOrientation = .up
+    /// Persisted when available so digital zoom cannot silently alter scale.
+    /// Nil belongs to captures created before this metadata was recorded.
+    var zoomFactor: Float? = nil
 
     /// A missing metadata record belongs to a legacy or library capture and is
     /// handled by the caller as unknown. Two known camera captures are only
     /// comparable when both their optical position and lens type match.
     func isComparable(with other: CaptureCameraMetadata) -> Bool {
-        position == other.position && lensType == other.lensType
+        guard position == other.position,
+              lensType == other.lensType,
+              normalizedOrientation == other.normalizedOrientation else { return false }
+        if let zoomFactor, let otherZoom = other.zoomFactor {
+            return abs(zoomFactor - otherZoom) <= 0.01
+        }
+        return true
     }
+}
+
+/// A reproducible, privacy-safe camera configuration. The identifier also
+/// serves as the first-generation baseline-era identifier; Phase 2 can attach
+/// verification state without rewriting existing scans.
+struct CaptureRecipe: Identifiable, Codable, Hashable {
+    var id = UUID()
+    var createdAt = Date()
+    var cameraPosition: CaptureCameraPosition
+    var lensType: String
+    var zoomFactor: Float?
+    var normalizedOrientation: CaptureImageOrientation
+
+    func isCompatible(with metadata: CaptureCameraMetadata) -> Bool {
+        guard cameraPosition == metadata.position,
+              lensType == metadata.lensType,
+              normalizedOrientation == metadata.normalizedOrientation else { return false }
+        if let zoomFactor, let capturedZoom = metadata.zoomFactor {
+            return abs(zoomFactor - capturedZoom) <= 0.01
+        }
+        return zoomFactor == nil
+    }
+
+    func isCompatible(with other: CaptureRecipe) -> Bool {
+        guard cameraPosition == other.cameraPosition,
+              lensType == other.lensType,
+              normalizedOrientation == other.normalizedOrientation else { return false }
+        switch (zoomFactor, other.zoomFactor) {
+        case let (lhs?, rhs?): return abs(lhs - rhs) <= 0.01
+        case (nil, nil): return true
+        default: return false
+        }
+    }
+
+    static func derive(from captures: [PoseCapture]) -> CaptureRecipe? {
+        let required = Pose.required.compactMap { pose in captures.first { $0.pose == pose } }
+        guard required.count == Pose.required.count,
+              required.allSatisfy({ $0.captureSource == .camera }),
+              let first = required.first?.cameraMetadata,
+              required.allSatisfy({ capture in
+                  guard let metadata = capture.cameraMetadata else { return false }
+                  return metadata.isComparable(with: first)
+              }) else { return nil }
+        return CaptureRecipe(
+            cameraPosition: first.position,
+            lensType: first.lensType,
+            zoomFactor: first.zoomFactor,
+            normalizedOrientation: first.normalizedOrientation
+        )
+    }
+}
+
+enum CaptureConfigurationIntent: Hashable {
+    case matchActiveRecipe
+    case startNewBaseline
+    case documentationOnly
 }
 
 enum CaptureVerificationStatus: String, Codable, Hashable {
@@ -386,9 +465,9 @@ enum CaptureVerificationStatus: String, Codable, Hashable {
 
     var label: String {
         switch self {
-        case .ready: return "Ready"
+        case .ready: return "Pose check verified"
         case .reviewRecommended: return "Review recommended"
-        case .unavailable: return "Automatic check unavailable"
+        case .unavailable: return "Could not verify automatically"
         }
     }
 }
@@ -399,6 +478,7 @@ enum CaptureRegion: String, Codable, CaseIterable, Hashable {
     case waist
     case arms
     case sideTorso
+    case lowerBody
 }
 
 enum RegionEvidenceState: String, Codable, Hashable {
@@ -456,19 +536,19 @@ struct CaptureAssessment: Codable, Hashable {
 
     var automaticStatusTitle: String {
         switch status {
-        case .ready: return "Automatic framing verified"
+        case .ready: return "Pose landmarks detected"
         case .reviewRecommended:
             if confirmedIssues.contains(.tooDark) { return "Extremely dark" }
             if confirmedIssues.contains(.overexposed) { return "Heavily overexposed" }
             return "Review recommended"
-        case .unavailable: return "Automatic check unavailable"
+        case .unavailable: return "Could not verify automatically"
         }
     }
 
     var automaticStatusDetail: String {
         switch status {
         case .ready:
-            return "Required upper-body framing was detected."
+            return "Required pose landmarks were detected. Review the pose yourself before using it."
         case .reviewRecommended:
             if confirmedIssues.contains(.tooDark) {
                 return "The photo is extremely dark and may hide body contours."
@@ -485,6 +565,10 @@ struct CaptureAssessment: Codable, Hashable {
                 return "The automatic check could not read this image."
             case "required_torso_landmarks_not_verified", "body_landmarks_not_verified":
                 return "Body landmarks could not be confirmed. This does not mean the photo is poor."
+            case "side_torso_landmarks_not_verified":
+                return "A complete visible shoulder-to-hip line could not be confirmed. Side profiles are harder to detect, and this does not mean the photo is poor."
+            case "lower_body_landmarks_not_verified":
+                return "Complete hip-to-ankle landmarks could not be confirmed. This does not mean the photo is poor."
             case "legacy_capture_not_verified":
                 return "This photo was saved before automatic evidence details were available."
             default:
@@ -522,6 +606,7 @@ enum ScanCaptureCompleteness: String, Codable, Hashable {
 enum ScanRole: String, Codable, Hashable {
     case canonical
     case sameDayExtra
+    case documentationOnly
     case validationAnchor
     case validationRepeat
 
@@ -529,6 +614,7 @@ enum ScanRole: String, Codable, Hashable {
         switch self {
         case .canonical: return "Progress scan"
         case .sameDayExtra: return "Same-day extra"
+        case .documentationOnly: return "Photos only"
         case .validationAnchor: return "Consistency anchor"
         case .validationRepeat: return "Consistency repeat"
         }
@@ -587,6 +673,9 @@ struct Scan: Identifiable, Codable {
     /// Optional fields preserve decoding of every scan saved before Phase 2.
     var validationSessionID: UUID? = nil
     var validationSetNumber: Int? = nil
+    /// Canonical scans with the same non-nil identifier share a camera setup.
+    /// Nil represents legacy scans for which no complete recipe was available.
+    var captureRecipeID: UUID? = nil
 
     var standardCaptures: [PoseCapture] { captures.filter { $0.pose.category == .standard } }
     var showcaseCaptures: [PoseCapture] { captures.filter { $0.pose.category == .showcase } }
@@ -611,7 +700,7 @@ struct Scan: Identifiable, Codable {
     var recommendedRepairPoses: [Pose] {
         Pose.required.filter { pose in
             guard let capture = capture(for: pose) else { return true }
-            return capture.assessment?.status != .ready
+            return capture.assessment?.status == .reviewRecommended
         }
     }
 
@@ -872,6 +961,28 @@ enum BodyRegion: String, Codable, CaseIterable, Hashable {
     }
 }
 
+extension BodyRegion {
+    /// A pose-aware label. The same normalized feature must not be described as
+    /// relaxed and flexed evidence interchangeably.
+    func visualLabel(for pose: Pose?) -> String {
+        guard let pose else { return visualLabel }
+        switch (pose, self) {
+        case (.frontDoubleBicep, .arms), (.backDoubleBicep, .arms):
+            return "Flexed upper-arm silhouette"
+        case (.sideChest, .arms), (.mostMuscular, .arms):
+            return "Flexed arm silhouette"
+        case (.sideChest, .chest):
+            return "Side-chest silhouette"
+        case (.backDoubleBicep, .shoulders):
+            return "Flexed back-and-shoulder silhouette"
+        case (.legs, .thighs):
+            return "Thigh silhouette thickness"
+        default:
+            return visualLabel
+        }
+    }
+}
+
 enum PoseRegionFeatureSource: String, Codable, Hashable {
     case torsoCrossSection
     case limbCrossSection
@@ -914,6 +1025,89 @@ struct RegionalComparison: Codable, Hashable {
     var normalizedDelta: Float?
     var contributions: [PoseContribution]
     var reason: String?
+}
+
+/// A same-pose comparison. These results stay separate from the mandatory
+/// relaxed-pose fusion, preventing a flexed or angled pose from changing the
+/// relaxed upper-body result.
+struct PoseComparison: Codable, Hashable {
+    var pose: Pose
+    var availability: AnalysisAvailability
+    var regions: [RegionalComparison]
+    var reason: String?
+
+    var supportedRegions: [RegionalComparison] {
+        regions.filter { $0.status != .unavailable }
+    }
+}
+
+/// A runtime comparison for the exact two scans selected by the user. It is
+/// intentionally derived from stored local evidence rather than persisted as
+/// if it were the canonical longitudinal result.
+struct ScanPairComparison: Hashable {
+    var beforeScanID: UUID
+    var afterScanID: UUID
+    var availability: AnalysisAvailability
+    var relaxedRegions: [RegionalComparison]
+    var poseComparisons: [PoseComparison]
+    var evidenceStrength: Confidence
+    var reason: String?
+
+    func comparison(for pose: Pose) -> PoseComparison? {
+        poseComparisons.first { $0.pose == pose }
+    }
+
+    func evidenceStrength(for pose: Pose) -> Confidence {
+        let regions = pose.category == .standard
+            ? relaxedRegions.filter { $0.status != .unavailable }
+            : comparison(for: pose)?.supportedRegions ?? []
+        let matches = regions.flatMap(\.contributions).compactMap(\.poseMatchScore)
+        guard !regions.isEmpty, !matches.isEmpty else { return .low }
+        let average = matches.reduce(0, +) / Float(matches.count)
+        // Provisional thresholds can describe moderate evidence support, but
+        // cannot earn a high label until a validated threshold set is stored.
+        return regions.count >= 2 && average >= 0.85 ? .medium : .low
+    }
+}
+
+/// The conclusion Evolv may draw from an exact scan pair. This is deliberately
+/// narrower than a fitness outcome: a supported silhouette difference is not
+/// automatically body progress, muscle gain, or fat loss.
+enum ComparisonNarrativeStatus: String, Codable, Hashable {
+    case stable
+    case differenceDetected
+    case limited
+    case unavailable
+}
+
+/// One authoritative, evidence-backed statement used by both Home and
+/// Timeline. A nil pose means the result came from fused relaxed-pose evidence;
+/// an optional pose always remains isolated from that fusion.
+struct ComparisonNarrativeFinding: Identifiable, Codable, Hashable {
+    var pose: Pose?
+    var region: BodyRegion
+    var status: RegionalComparisonStatus
+    var normalizedDelta: Float?
+    var evidenceStrength: Confidence
+    var goalAlignment: GoalAlignment
+    var statement: String
+
+    var id: String {
+        "\(pose?.rawValue ?? "relaxed")-\(region.rawValue)"
+    }
+}
+
+/// A local interpretation of `ScanPairComparison`. It contains no image data,
+/// landmarks, inferred tissue labels, or fabricated physical measurements.
+struct ComparisonNarrative: Codable, Hashable {
+    var status: ComparisonNarrativeStatus
+    var headline: String
+    var detail: String
+    var findings: [ComparisonNarrativeFinding]
+    var limitations: [String]
+    var evidenceStrength: Confidence
+    var thresholdSetIdentifier: String
+    var thresholdsValidated: Bool
 }
 
 enum GoalAlignment: String, Codable, Hashable {
@@ -1037,6 +1231,9 @@ struct VisualSignalSet: Codable {
     var fatLossSignals: FatLossSignalSet?
     var reliabilityTier: ReliabilityTier
     var regionalComparisons: [RegionalComparison]? = nil
+    /// Same-pose evidence for required and optional photos. Optional so every
+    /// analysis created before version 6 remains decodable.
+    var poseComparisons: [PoseComparison]? = nil
 }
 
 struct SmoothedSignalSet: Codable {
@@ -1139,6 +1336,7 @@ struct AnalysisRunReport: Codable {
     var poseMatchScores: [String: Float] = [:]
     var stageTimingsSeconds: [String: Double] = [:]
     var wording: GeneratedInsight? = nil
+    var comparisonNarrative: ComparisonNarrative? = nil
 }
 
 // MARK: - Calibration UX

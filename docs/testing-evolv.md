@@ -2,18 +2,30 @@
 
 For the invited five-person sharing backend, consent, encrypted photo handling, and researcher reports, also follow [pilot-validation.md](pilot-validation.md).
 
-Evolv analysis version 5 is intentionally abstention-first. It retains the version-4 person-aligned extraction and adds known camera-configuration comparability. A passing test run proves that the software obeys its evidence rules; it does not by itself validate the provisional `engineering-v1` thresholds on people. Those thresholds remain limited until the held-out protocol below passes.
+Evolv analysis version 7 is intentionally abstention-first. It retains person-aligned extraction, camera-configuration comparability, isolated same-pose optional analysis, and exact baseline, previous, or custom scan-pair comparisons. It also keeps the latest baseline-relative observation literal and requires two uninterrupted supported observations before describing a visual direction as repeated. A passing test run proves that the software obeys its evidence rules; it does not by itself validate the provisional `engineering-v1` thresholds on people. Those thresholds remain limited until the held-out protocol below passes.
 
 ## One-command runner
 
 Run commands from the repository root:
 
 ```sh
+scripts/evolv-phase5-gate automated
+scripts/evolv-phase5-gate pilot --device YOUR_IPHONE_UDID
 scripts/test-evolv-analysis unit
 scripts/test-evolv-analysis device --device YOUR_IPHONE_UDID
 scripts/test-evolv-analysis cloud-contract
 scripts/test-evolv-analysis all --device YOUR_IPHONE_UDID
 ```
+
+`evolv-phase5-gate` is the fail-closed rollout entry point:
+
+- `automated` runs public-fixture contracts, privacy/version checks, statistics self-tests, the unit plan, and an unsigned generic-device build;
+- `device` runs the Vision fixture plan on an explicit physical iPhone;
+- `pilot` requires both and is the minimum gate for an unvalidated invite-only study build;
+- `human` evaluates the locked participant split, held-out repeatability report, and signed subgroup review;
+- `release` requires automated, device, and human gates. It never deploys, uploads, archives, changes a threshold, or creates a TestFlight build.
+
+Each run writes a machine-readable status under `ios/build/phase5-validation/`. No gate edits the compiled threshold set. A complete `release` pass can mark the build eligible for a separately reviewed `validated-v1` promotion; `thresholds_validated` remains false until that new immutable threshold set is reviewed, added, and retested.
 
 Find the physical iPhone UDID with:
 
@@ -49,14 +61,20 @@ scripts/test-evolv-analysis device --device YOUR_IPHONE_UDID
 - front/side/back fusion and disagreement abstention;
 - stable zero values versus missing evidence;
 - literal physical direction and separate goal alignment;
-- optional-pose isolation and removal of thigh visual claims;
-- v3 decoding and v4 migration fields;
+- optional same-pose analysis, relaxed-result isolation, and legs-only thigh evidence;
+- a declared stable synthetic contract for every analytical region of all nine poses, plus rejection of relaxed/flexed cross-pose substitution;
+- deterministic exact-pair narratives that distinguish supported stability, experimental differences, limited evidence, and unavailable evidence;
+- goal alignment that cannot reverse physical direction, plus rejection of cloud prose that adds unsupported regions or stronger confidence;
+- explicit scan-linked measurement comparison, skipped-value preservation, literal numeric direction, and legacy unlinked-measurement decoding;
+- longitudinal confirmation requiring the latest two uninterrupted supported baseline comparisons, including mixed-direction and unavailable-interruption handling;
+- current observations that remain literal instead of being averaged with older baseline-relative deltas;
+- legacy decoding and current analysis migration fields;
 - orientation, storage, privacy, and safe wording;
 - local five-set protocol eligibility, expiry, draft recovery, progress isolation, and result classification;
 - the TestFlight-only gate, local-preview boundary, pilot consent rules, encryption envelope, and authenticated cancellation request;
 - rejection of unsafe cloud prose.
 
-`device` runs `Evolv-Vision-Device.xctestplan` on the selected iPhone. It runs the full Vision pose and segmentation path with generated front, side, and back fixtures, four identical simulated weeks, and a complete five-set local consistency-test evaluation. It also covers recompression, orientation, brightness, contrast, translation, ±2° rotation, valid crop, and ±3/5/8% scale transforms. Valid transforms must remain supported and stable. Deliberately invalid crop, occlusion, orientation/pose, and exposure fixtures must become unavailable.
+`device` runs `Evolv-Vision-Device.xctestplan` on the selected iPhone. It runs the full Vision pose and segmentation path with generated front, side, and back fixtures, every optional same-pose fixture, four identical simulated weeks, and a complete five-set local consistency-test evaluation. It also covers recompression, orientation, brightness, contrast, translation, ±2° rotation, valid crop, and ±3/5/8% scale transforms. Valid transforms must remain supported and stable. Every optional fixture must produce stable isolated evidence when compared with itself. Deliberately invalid crop, occlusion, orientation/pose, and exposure fixtures must become unavailable.
 
 `cloud-contract` first runs the mocked privacy and wording contract. It does not contact a service unless `EVOLV_CLOUD_CONTRACT_URL` is set. To exercise a deployed endpoint with `curl`:
 
@@ -70,7 +88,7 @@ The request is [cloud-contract-request.json](../scripts/fixtures/cloud-contract-
 
 ## Fixtures and privacy
 
-The nine public generated images are stored as app assets and described by [manifest.json](../ios/EvolvTests/Fixtures/Public/manifest.json). Images 1–3 are the mandatory analytical fixtures. Images 4–9 verify that showcase photos cannot affect analysis.
+The nine public generated images are stored as app assets and described by [manifest.json](../ios/EvolvTests/Fixtures/Public/manifest.json). Images 1–3 are the mandatory relaxed-pose fixtures. Images 4–9 exercise isolated same-pose optional analysis: an optional photo may affect only its matching optional-pose result and must never alter the relaxed-pose aggregate. Run `scripts/evolv-fixture-audit` to verify all nine assets, every declared pose/region contract, the transform matrix, invalid cases, and the private-fixture boundary.
 
 Consented real-person fixtures belong under:
 
@@ -107,7 +125,7 @@ The directory contains the raw `.xcresult`, Xcode log, `summary.json`, `tests.js
 - landmarks;
 - torso and arm sampling lines;
 - pose contributions and regional comparisons;
-- safe wording output;
+- safe template wording and exact-pair narrative output;
 - timing, memory, and storage metrics.
 
 Interpret the statuses literally:
@@ -117,6 +135,12 @@ Interpret the statuses literally:
 - `unavailable`: missing, incomparable, or conflicting evidence; never read this as stable;
 - `pose_not_comparable`: the same-pose score fell below 0.85;
 - `cross_pose_conflict`: supported pose deltas disagreed in direction or exceeded the spread limit.
+
+The Timeline **Evolv Read** is generated on-device from those exact statuses. It may summarize a supported normalized 2D difference or stability, but it must never convert photos into inches or call a silhouette change muscle gain, fat loss, or body-composition change. Optional-pose findings are named with their pose and remain separate from the fused relaxed result. Goal alignment is shown only after direction has been established and cannot change the underlying increase/decrease/stable result.
+
+The separate **Logged Measurements** card uses only weight or tape values explicitly linked to the selected before and after scans. It never assigns an older entry by date, fills a skipped field, or estimates a circumference from a photo. A same-direction label means only that the entered measurement and normalized silhouette moved in the same direction; it does not merge their units or increase visual evidence strength. Legacy unlinked measurements remain available in historical charts.
+
+The Stats **Longitudinal Visual Patterns** card compares each eligible scan with the current baseline. One non-neutral observation is labeled as a one-scan difference. A direction becomes repeated only when the two latest uninterrupted observations both support that direction; an unavailable intervening scan breaks the run, and opposite directions become mixed. Optional poses follow the same rule but remain isolated by exact pose. Repeated still means repeated normalized 2D evidence—not validated physiology or body composition.
 
 Performance baselines are stored per device and OS by the test host. A later median three-pose run fails after a regression greater than 20% on the same configuration.
 
@@ -158,7 +182,15 @@ Run at least five repositioned scans per pilot participant. Review the image, ma
 
 ## Real-person calibration and held-out validation
 
-Use [participant-manifest-template.csv](validation/participant-manifest-template.csv) before collecting scans. Assign participants—not scan pairs—to `calibration` or `heldout` before thresholds are derived. The same participant must never appear in both groups.
+Use [participant-manifest-template.csv](validation/participant-manifest-template.csv) before collecting scans. Assign participants—not scan pairs—to `calibration` or `heldout` before thresholds are derived. The same participant must never appear in both groups. Lock that assignment before examining outcomes:
+
+```sh
+scripts/evolv-lock-validation-split \
+  private/validation/participants.csv \
+  private/validation/split-lock.json
+```
+
+The lock contains only an assignment digest and counts—not participant IDs. It refuses overwrite. Demographic or protocol-note corrections may be made later, but changing a participant's calibration/held-out assignment invalidates the lock and requires a new preregistered study.
 
 Minimum phases:
 
@@ -171,33 +203,63 @@ Record regional repeatability rows with [repeatability-results-template.csv](val
 ```sh
 scripts/evolv-validation-stats \
   docs/validation/repeatability-results.csv \
-  ios/build/analysis-validation/repeatability-report.json
+  ios/build/analysis-validation/repeatability-report.json \
+  private/validation/subgroup-review.json
 ```
+
+Add one frozen `candidate-*` threshold identifier to every held-out row. Do not evaluate held-out data repeatedly under changing candidates. Copy [subgroup-review-template.json](validation/subgroup-review-template.json), insert the input digest from the first statistics report, review the reported cells, and record the decision. A material disparity fails promotion; it is not a checkbox to override.
 
 The report derives calibration candidates from the calibration participants and evaluates only held-out participants for promotion. It reports:
 
-- participant-clustered false-change rate and one-sided 95% upper bound;
+- participant-level false-change events and a one-sided 95% Wilson upper bound. Unlike a percentile bootstrap, this does not report a false zero upper bound when a small sample observes no errors;
 - unexpected abstention separately;
 - error and abstention by evidence strength;
 - body type, skin tone, clothing, device, and environment subgroups;
 - Bland–Altman limits for repeated Evolv features in the same normalized units.
 
-The script intentionally has no tape-measure comparison field. Tape circumference is not interchangeable with silhouette width. For the longitudinal protocol, use [longitudinal-template.csv](validation/longitudinal-template.csv), measure tape values in triplicate with a blinded measurer, and evaluate direction only after change exceeds that method's repeatability error. Prefer an independent 3D scan or manually annotated contour for geometric accuracy.
+The script intentionally has no tape-measure comparison field. Tape circumference is not interchangeable with silhouette width. For the longitudinal protocol, use [longitudinal-template.csv](validation/longitudinal-template.csv), measure tape values in triplicate with a blinded measurer, and run:
+
+```sh
+scripts/evolv-longitudinal-validation \
+  private/validation/longitudinal.csv \
+  ios/build/phase5-validation/longitudinal-report.json
+```
+
+This computes the median of each triplicate, requires 8–12 weeks, and evaluates direction only when a change exceeds the tape method's repeatability error. It reports directional corroboration—not agreement of unlike units. Prefer an independent 3D scan or manually annotated contour for geometric accuracy.
 
 The default unexpected-abstention cap is a provisional 15%; change it only in a preregistered validation protocol:
 
 ```sh
-EVOLV_MAX_ABSTENTION_RATE=0.10 scripts/evolv-validation-stats INPUT.csv OUTPUT.json
+EVOLV_MAX_ABSTENTION_RATE=0.10 \
+  scripts/evolv-validation-stats INPUT.csv OUTPUT.json SUBGROUP_REVIEW.json
 ```
+
+Run the complete human gate with private, Git-ignored inputs:
+
+```sh
+scripts/evolv-phase5-gate human \
+  --participants private/validation/participants.csv \
+  --split-lock private/validation/split-lock.json \
+  --repeatability private/validation/repeatability.csv \
+  --subgroup-review private/validation/subgroup-review.json \
+  --longitudinal private/validation/longitudinal.csv
+```
+
+The longitudinal file is optional for validating conservative normalized-shape wording. It is required before proposing any stronger longitudinal interpretation.
 
 ## Release gates
 
-Do not promote `engineering-v1` to `validated-v1`, produce a TestFlight build, or strengthen visual-shape wording unless all applicable gates pass:
+There are two rollout levels:
+
+- An invite-only, unvalidated TestFlight study build may proceed only after `scripts/evolv-phase5-gate pilot --device ...` and the pilot backend live security gate pass. It must retain `engineering-v1`, limited/experimental wording, and explicit study consent.
+- A public evidence claim or `validated-v1` promotion requires `scripts/evolv-phase5-gate release ...` plus human review of its generated report. The command does not itself change application code.
+
+Do not promote `engineering-v1` to `validated-v1` or strengthen visual-shape wording unless all applicable gates pass:
 
 - unit suite passes;
 - exact and every valid transformed public fixture produce zero false-change claims and no unexpected abstention;
 - every deliberately invalid fixture abstains;
-- optional images 4–9 cannot alter any analytical output;
+- optional images 4–9 can alter only their matching optional-pose result and cannot alter the relaxed-pose aggregate;
 - no fixture photo appears in a network payload;
 - physical-device median performance has not regressed more than 20%;
 - calibration and held-out participants are disjoint;
@@ -205,6 +267,8 @@ Do not promote `engineering-v1` to `validated-v1`, produce a TestFlight build, o
 - unexpected abstention is below the preregistered cap;
 - higher evidence strength has lower error and abstention than lower evidence strength;
 - subgroup results have been reviewed for material disparity.
+
+A one-sided upper bound ≤5% can require substantially more than 30 participants even with no observed false changes. Thirty is the collection floor, not a promise that the statistical gate will pass. Never loosen that bound after seeing results.
 
 Until those human-validation gates pass, the app may show stable/raw visual comparisons, but non-neutral changes remain experimental/limited and wording stays at “silhouette increased/decreased/stable.”
 

@@ -7,6 +7,18 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## Unreleased
 
+- Added a fail-closed Phase 5 rollout gate with distinct automated, physical-iPhone pilot, held-out human-validation, and public-release eligibility modes.
+- Added complete nine-pose fixture/region contracts, cross-pose substitution tests, participant split locking, conservative participant-level repeatability bounds, signed subgroup review, and 8–12 week triplicate-median validation reports.
+- Tied pilot payload and backend health versions to analysis v7 and reject unsupported future analysis payloads while preserving supported historical submissions.
+- Added analysis v7 longitudinal visual patterns: one-scan differences stay emerging, repeated directions require the two latest uninterrupted supported observations, and conflicts remain mixed.
+- Removed cross-week EWMA wording inputs so an older baseline-relative delta cannot dilute or reverse the latest literal observation.
+- Added a Stats history card for relaxed and isolated optional-pose patterns, with provisional-threshold caveats and no tissue claims.
+- Added optional scan-linked weight and tape entries with exact baseline, previous, and custom-pair numeric comparisons.
+- Kept skipped measurements unavailable, preserved legacy unlinked history, and separated measurement direction agreement from photo evidence strength.
+- Added post-scan and scan-detail measurement editing for weight, arms, chest, waist, shoulders, and thighs.
+- Added an on-device exact-pair “Evolv Read” that summarizes supported stability, experimental visual differences, limitations, and optional same-pose evidence without inventing physiological claims.
+- Added goal-alignment context that cannot reverse the underlying physical direction, and strengthened cloud prose validation against unsupported regions or inflated evidence strength.
+- Renamed manually entered measurement and weight summaries so they are not presented as photo-estimated body progress.
 - Added a fail-closed pilot rollout gate covering configuration consistency, local migrations, Edge Function health, hosted penetration testing, and explicit physical-iPhone validation.
 - Added a privacy-safe pilot health contract that verifies both database schema generations without exposing study or participant data.
 - Fixed missing explicit `service_role` table and identity-sequence privileges that would have prevented the private pilot Edge Functions from operating in production.

@@ -1,0 +1,45 @@
+#!/bin/zsh
+set -euo pipefail
+
+SCRIPT_DIR=${0:A:h}
+TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/evolv-longitudinal.XXXXXX")
+cleanup() {
+  [[ "$TEST_DIR" == *evolv-longitudinal.* ]] && rm -rf -- "$TEST_DIR"
+}
+trap cleanup EXIT INT TERM
+
+ruby -rcsv -e '
+  destination = ARGV.fetch(0)
+  headers = %w[pseudonymous_subject week scan_id region evolv_direction evolv_feature measurement_1_cm measurement_2_cm measurement_3_cm blinded_measurer measurement_repeatability_error_cm independent_3d_or_contour_reference notes]
+  CSV.open(destination, "w", write_headers: true, headers: headers) do |csv|
+    8.times do |index|
+      measurement = 80.0 + index * 0.2
+      direction = index.zero? ? "stable" : "increase"
+      csv << ["P001", index + 1, "scan-#{index + 1}", "waist", direction, 0.3 + index * 0.001, measurement - 0.1, measurement, measurement + 0.1, "M001", 0.15, "", ""]
+    end
+  end
+' "$TEST_DIR/valid.csv"
+
+"$SCRIPT_DIR/evolv-longitudinal-validation" "$TEST_DIR/valid.csv" "$TEST_DIR/report.json"
+jq -e '
+  .series[0].baseline_measurement_median_cm == 80 and
+  .series[0].latest_measurement_median_cm == 81.4 and
+  .series[0].measurement_direction == "increase" and
+  .series[0].directional_agreement == "same_direction"
+' "$TEST_DIR/report.json" >/dev/null
+
+ruby -rcsv -e '
+  source, destination = ARGV
+  table = CSV.read(source, headers: true)
+  rows = table.map(&:to_h)
+  rows.pop
+  CSV.open(destination, "w", write_headers: true, headers: table.headers) do |csv|
+    rows.each { |row| csv << row }
+  end
+' "$TEST_DIR/valid.csv" "$TEST_DIR/too-short.csv"
+if "$SCRIPT_DIR/evolv-longitudinal-validation" "$TEST_DIR/too-short.csv" >/dev/null 2>&1; then
+  print -u2 "Longitudinal self-test failed: a seven-week series was accepted."
+  exit 1
+fi
+
+print "Longitudinal triplicate-median self-test passed."

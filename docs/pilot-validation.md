@@ -13,6 +13,14 @@ scripts/evolv-pilot-readiness config
 scripts/evolv-pilot-readiness local
 ```
 
+Before producing an invite-only study build, run the consolidated Phase 5 pilot gate as well:
+
+```sh
+scripts/evolv-phase5-gate pilot --device PHYSICAL_IPHONE_DEVICE_ID
+```
+
+This permits a provisional `engineering-v1` pilot only; it does not validate thresholds or approve public analytical claims.
+
 The deployment command intentionally refuses to continue while the Supabase
 project is paused, when any required secret is missing or shorter than 32
 characters, or unless the exact project reference is supplied as an explicit

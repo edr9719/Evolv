@@ -4,6 +4,7 @@ enum PilotStudyConfiguration {
     static let consentVersion = "pilot-consent-v1"
     static let ongoingConsentVersion = "pilot-ongoing-v1"
     static let payloadSchemaVersion = 1
+    static let analysisVersion = AnalysisStore.currentAnalysisVersion
     static let maximumPhotoCount = ValidationStudySession.requiredSetCount * Pose.required.count
     static let maximumCiphertextBytes = 5 * 1_024 * 1_024
     static let keyAgreementPublicKeyVersion = "pilot-p256-v1"

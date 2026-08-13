@@ -2,6 +2,62 @@ import Foundation
 import UIKit
 import OSLog
 
+/// Applies the user's explicit backup preference to Evolv's app-owned
+/// Documents and Application Support directories. Apple backup remains allowed
+/// unless local-only mode is deliberately enabled. The preference is mirrored
+/// in UserDefaults so detached photo writes can enforce it without UI state.
+enum DeviceBackupPolicy {
+    static let preferenceKey = "evolv.localOnlyStorageEnabled"
+
+    static func isLocalOnly(defaults: UserDefaults = .standard) -> Bool {
+        defaults.bool(forKey: preferenceKey)
+    }
+
+    static func setLocalOnly(
+        _ enabled: Bool,
+        defaults: UserDefaults = .standard,
+        documentsURL: URL? = nil
+    ) throws {
+        let urls = storageURLs(override: documentsURL)
+        for url in urls {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            try apply(excludeFromBackup: enabled, to: url)
+        }
+        defaults.set(enabled, forKey: preferenceKey)
+    }
+
+    static func applyStoredPreference(
+        defaults: UserDefaults = .standard,
+        documentsURL: URL? = nil
+    ) throws {
+        let enabled = isLocalOnly(defaults: defaults)
+        for url in storageURLs(override: documentsURL) {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            try apply(excludeFromBackup: enabled, to: url)
+        }
+    }
+
+    static func apply(excludeFromBackup: Bool, to url: URL) throws {
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = excludeFromBackup
+        var mutableURL = url
+        try mutableURL.setResourceValues(values)
+    }
+
+    static func isExcludedFromBackup(at url: URL) -> Bool? {
+        try? url.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup
+    }
+
+    private static func storageURLs(override: URL?) -> [URL] {
+        if let override { return [override] }
+        let manager = FileManager.default
+        return [
+            manager.urls(for: .documentDirectory, in: .userDomainMask).first!,
+            manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        ]
+    }
+}
+
 /// Persists captured pose images to the app's Documents directory and loads them back.
 enum PhotoStore {
     static let protectedWriteOptions: Data.WritingOptions = [.atomic, .completeFileProtection]
@@ -29,6 +85,7 @@ enum PhotoStore {
 
     private static func folder() throws -> URL {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        try? DeviceBackupPolicy.applyStoredPreference(documentsURL: docs)
         let url = docs.appendingPathComponent("scans", isDirectory: true)
         if !FileManager.default.fileExists(atPath: url.path) {
             do {
