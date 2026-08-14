@@ -19,34 +19,36 @@ struct PrivacySettingsView: View {
                 VStack(spacing: 18) {
                     privacyHero
 
-                    SettingsGroup(
-                        header: "Cloud insights",
-                        footer: "When enabled, Evolv sends an anonymous derived trend summary—not photos, filenames, landmarks, or raw measurements—to its insight service."
-                    ) {
-                        Toggle(isOn: cloudInsightsBinding) {
-                            HStack(spacing: 14) {
-                                Image(systemName: "cloud")
-                                    .font(.system(size: 14, weight: .medium))
-                                    .foregroundStyle(EvolvTheme.text)
-                                    .frame(width: 26)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("Cloud-written insights")
-                                        .font(.system(size: 14.5, weight: .semibold, design: .rounded))
+                    if Build17PilotConfiguration.cloudWrittenInsightsAvailable {
+                        SettingsGroup(
+                            header: "Cloud insights",
+                            footer: "When enabled, Evolv sends an anonymous derived trend summary—not photos, filenames, landmarks, or raw measurements—to its insight service."
+                        ) {
+                            Toggle(isOn: cloudInsightsBinding) {
+                                HStack(spacing: 14) {
+                                    Image(systemName: "cloud")
+                                        .font(.system(size: 14, weight: .medium))
                                         .foregroundStyle(EvolvTheme.text)
-                                    Text(app.profile.usesCloudInsights ? "Enabled" : "Off — summaries are generated on device")
-                                        .font(.system(size: 12, design: .rounded))
-                                        .foregroundStyle(EvolvTheme.textMuted)
+                                        .frame(width: 26)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Cloud-written insights")
+                                            .font(.system(size: 14.5, weight: .semibold, design: .rounded))
+                                            .foregroundStyle(EvolvTheme.text)
+                                        Text(app.profile.usesCloudInsights ? "Enabled" : "Off — summaries are generated on device")
+                                            .font(.system(size: 12, design: .rounded))
+                                            .foregroundStyle(EvolvTheme.textMuted)
+                                    }
                                 }
                             }
+                            .tint(EvolvTheme.accent)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 14)
                         }
-                        .tint(EvolvTheme.accent)
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 14)
                     }
 
                     SettingsGroup(
                         header: "Consistency pilot",
-                        footer: "Pilot sharing and cloud-written insights are separate choices. Joining one never enables the other."
+                        footer: "Joining the pilot changes only the results or photos you explicitly approve for sharing."
                     ) {
                         NavigationLink(destination: PilotDataSharingView()) {
                             HStack(spacing: 14) {
@@ -123,14 +125,16 @@ struct PrivacySettingsView: View {
                         ) {
                             showManageScans = true
                         }
-                        SettingsDivider()
-                        actionRow(
-                            icon: "square.and.arrow.up",
-                            title: "Export your data",
-                            subtitle: "Save a copy you can keep",
-                            tint: EvolvTheme.text
-                        ) {
-                            showExportSheet = true
+                        if Build17PilotConfiguration.dataExportAvailable {
+                            SettingsDivider()
+                            actionRow(
+                                icon: "square.and.arrow.up",
+                                title: "Export your data",
+                                subtitle: "Save a copy you can keep",
+                                tint: EvolvTheme.text
+                            ) {
+                                showExportSheet = true
+                            }
                         }
                     }
 
@@ -234,7 +238,7 @@ struct PrivacySettingsView: View {
             VStack(alignment: .leading, spacing: 8) {
                 privacyBullet("camera", "Your photos stay on this iPhone unless you explicitly choose specific photos to share with Evolv.")
                 privacyBullet("lock", "Scan files use complete protection while your iPhone is locked.")
-                privacyBullet("wifi.slash", "Evolv works offline. Cloud-written wording is optional.")
+                privacyBullet("wifi.slash", "Evolv Read is generated on this iPhone and works offline.")
                 privacyBullet("icloud", app.profile.usesLocalOnlyStorage
                               ? "Local-only mode excludes Evolv data from future Apple device backups."
                               : "Apple may include app data in device backups. You can opt into local-only mode below.")

@@ -144,7 +144,7 @@ struct PilotEnrollmentSheet: View {
                 detail("Results do not include names, email, location, advertising IDs, filenames, raw landmarks or masks, raw height, weight, or tape measurements.")
                 detail("If you choose photos, you approve them one by one after the test. They are encrypted on this iPhone before upload.")
                 detail("Pilot photos are deleted when the pilot closes. Structured results are deleted 12 months after submission. You can withdraw sooner without deleting your local timeline.")
-                detail("Cloud-written insights are a separate optional setting and are not turned on by joining this pilot.")
+                detail("Your Evolv Read remains generated on this iPhone during the pilot.")
             }
         }
     }

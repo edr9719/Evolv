@@ -236,7 +236,9 @@ final class AnalysisPipeline {
         let insight = await InsightEngine.generateInsight(
             signals: interpreted,
             networkProxy: dependencies.insightProvider,
-            allowCloud: profile.usesCloudInsights,
+            allowCloud: Build17PilotConfiguration.allowsCloudWrittenInsights(
+                preferenceEnabled: profile.usesCloudInsights
+            ),
             now: analyzedAt
         )
         var final = intermediate

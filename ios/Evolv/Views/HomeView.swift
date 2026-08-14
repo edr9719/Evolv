@@ -61,11 +61,13 @@ struct HomeView: View {
                             .scaledToFit()
                             .frame(height: 80)
                     }
-                    ToolbarItem(placement: .topBarLeading) {
-                        Button { showPaywall = true } label: {
-                            Image(systemName: "sparkle")
+                    if Build17PilotConfiguration.purchaseFlowsAvailable {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button { showPaywall = true } label: {
+                                Image(systemName: "sparkle")
+                            }
+                            .tint(EvolvTheme.accent)
                         }
-                        .tint(EvolvTheme.accent)
                     }
                     ToolbarItem(placement: .topBarTrailing) {
                         Button { showSettings = true } label: {

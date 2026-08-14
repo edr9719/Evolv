@@ -1,6 +1,32 @@
 import Foundation
 import SwiftUI
 
+/// Temporary product-surface policy for the invite-only Build 17 TestFlight.
+/// This grants access without creating a subscription or trial. Public-release
+/// purchasing and currently unavailable services remain separate future work.
+enum Build17PilotConfiguration {
+    static let isEnabled = true
+
+    static var grantsFullProductAccess: Bool { isEnabled }
+    static var purchaseFlowsAvailable: Bool { !isEnabled }
+    static let cloudWrittenInsightsAvailable = false
+    static let dataExportAvailable = false
+
+    static let accessMessage = "Pilot access — all Evolv features are unlocked during this TestFlight."
+
+    static func shouldPresentPostOnboardingPaywall(hasSeenPaywall: Bool) -> Bool {
+        purchaseFlowsAvailable && !hasSeenPaywall
+    }
+
+    static func hasFullProductAccess(subscriptionActive: Bool) -> Bool {
+        grantsFullProductAccess || subscriptionActive
+    }
+
+    static func allowsCloudWrittenInsights(preferenceEnabled: Bool) -> Bool {
+        cloudWrittenInsightsAvailable && preferenceEnabled
+    }
+}
+
 /// Production-shaped subscription service.
 /// Today the purchase flow is mocked locally — there is no real StoreKit transaction.
 /// The shape (async purchase, restore, product catalog, entitlement) is designed
@@ -100,6 +126,10 @@ final class PurchaseService {
     /// Mock implementation: simulates network latency, then grants a 10-day trial entitlement.
     @MainActor
     func purchase(_ plan: Plan) async -> Bool {
+        guard Build17PilotConfiguration.purchaseFlowsAvailable else {
+            state = .failed("Purchases are unavailable in this pilot build.")
+            return false
+        }
         state = .loading
         do {
             try await Task.sleep(nanoseconds: 1_200_000_000)
@@ -119,6 +149,10 @@ final class PurchaseService {
     /// Restore purchases. Mock implementation: no prior purchase to find on this device.
     @MainActor
     func restore() async -> Bool {
+        guard Build17PilotConfiguration.purchaseFlowsAvailable else {
+            state = .failed("Purchases are unavailable in this pilot build.")
+            return false
+        }
         state = .loading
         try? await Task.sleep(nanoseconds: 700_000_000)
         // In production: `try await AppStore.sync()` and re-evaluate Transaction.currentEntitlements

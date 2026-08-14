@@ -38,12 +38,16 @@ struct SettingsView: View {
                                 subtitle: "Local by default · sharing optional",
                                 destination: { PrivacySettingsView() }
                             )
-                            SettingsRowLink(
-                                icon: "sparkles",
-                                title: "Subscription",
-                                subtitle: "Free plan",
-                                destination: { SubscriptionSettingsView() }
-                            )
+                            if Build17PilotConfiguration.isEnabled {
+                                pilotAccessRow
+                            } else {
+                                SettingsRowLink(
+                                    icon: "sparkles",
+                                    title: "Subscription",
+                                    subtitle: "Free plan",
+                                    destination: { SubscriptionSettingsView() }
+                                )
+                            }
 
                             if ValidationProgramAvailability.isEnabled {
                                 SettingsRowLink(
@@ -81,6 +85,39 @@ struct SettingsView: View {
 
     private var profileSubtitle: String {
         app.profile.goal.rawValue
+    }
+
+    private var pilotAccessRow: some View {
+        HStack(spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(EvolvTheme.accent.opacity(0.10))
+                    .frame(width: 38, height: 38)
+                Image(systemName: "checkmark.seal")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(EvolvTheme.accent)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Build 17 TestFlight")
+                    .font(.system(size: 15.5, weight: .semibold, design: .rounded))
+                    .foregroundStyle(EvolvTheme.text)
+                Text(Build17PilotConfiguration.accessMessage)
+                    .font(.system(size: 12.5, design: .rounded))
+                    .foregroundStyle(EvolvTheme.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 16)
+        .background {
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(EvolvTheme.surface)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .stroke(EvolvTheme.stroke, lineWidth: 1)
+                }
+        }
     }
 
     private var notificationsSubtitle: String {

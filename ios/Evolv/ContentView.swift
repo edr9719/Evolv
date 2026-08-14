@@ -8,7 +8,9 @@ struct ContentView: View {
             Group {
                 if !app.hasCompletedOnboarding {
                     OnboardingFlowView()
-                } else if !app.profile.hasSeenPostOnboardingPaywall {
+                } else if Build17PilotConfiguration.shouldPresentPostOnboardingPaywall(
+                    hasSeenPaywall: app.profile.hasSeenPostOnboardingPaywall
+                ) {
                     PaywallView(context: .postOnboarding)
                         .transition(.opacity)
                 } else {

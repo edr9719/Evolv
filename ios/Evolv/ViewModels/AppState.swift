@@ -81,9 +81,12 @@ final class AppState {
         )
     }
 
-    /// True when premium is unlocked (trial or active sub).
+    /// True when the current product configuration grants full access or an
+    /// eventual StoreKit entitlement is active.
     var isPremium: Bool {
-        PurchaseService.shared.isSubscribed
+        Build17PilotConfiguration.hasFullProductAccess(
+            subscriptionActive: PurchaseService.shared.isSubscribed
+        )
     }
 
     /// Persist current PurchaseService entitlement back into profile.

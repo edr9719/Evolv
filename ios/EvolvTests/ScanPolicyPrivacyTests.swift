@@ -10,6 +10,62 @@ final class ScanPolicyPrivacyTests: XCTestCase {
         XCTAssertEqual(ProcessInfo.processInfo.environment["EVOLV_ALLOW_NETWORK"], "0")
     }
 
+    func testBuild17PilotFreshUserBypassesPaywallWithFullAccess() {
+        XCTAssertTrue(Build17PilotConfiguration.isEnabled)
+        XCTAssertFalse(
+            Build17PilotConfiguration.shouldPresentPostOnboardingPaywall(
+                hasSeenPaywall: false
+            )
+        )
+        XCTAssertTrue(
+            Build17PilotConfiguration.hasFullProductAccess(
+                subscriptionActive: false
+            )
+        )
+    }
+
+    @MainActor
+    func testBuild17PilotCannotActivateMockPurchaseOrTrial() async {
+        let service = PurchaseService.shared
+        service.bind(to: UserProfile())
+
+        let purchased = await service.purchase(.monthly)
+
+        XCTAssertFalse(purchased)
+        XCTAssertNil(service.activePlan)
+        XCTAssertNil(service.trialEndsAt)
+    }
+
+    func testBuild17PilotHidesUnavailableControlsWithoutChangingPreferences() {
+        var profile = UserProfile()
+        profile.cloudInsightsEnabled = true
+
+        XCTAssertFalse(Build17PilotConfiguration.purchaseFlowsAvailable)
+        XCTAssertFalse(Build17PilotConfiguration.cloudWrittenInsightsAvailable)
+        XCTAssertFalse(Build17PilotConfiguration.dataExportAvailable)
+        XCTAssertFalse(
+            Build17PilotConfiguration.allowsCloudWrittenInsights(
+                preferenceEnabled: profile.usesCloudInsights
+            )
+        )
+        XCTAssertTrue(profile.usesCloudInsights)
+    }
+
+    func testBuild17PilotUsesLocalEvolvReadWithoutCloudRequest() async {
+        let spy = InsightSpy()
+        let insight = await InsightEngine.generateInsight(
+            signals: comparableSignals(),
+            networkProxy: spy,
+            allowCloud: Build17PilotConfiguration.allowsCloudWrittenInsights(
+                preferenceEnabled: true
+            )
+        )
+        let requestCount = await spy.requestCount
+
+        XCTAssertEqual(requestCount, 0)
+        XCTAssertEqual(insight.source, .templateFallback)
+    }
+
     func testSecondCanonicalScanOnSameDayBecomesDocumentationOnly() {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
