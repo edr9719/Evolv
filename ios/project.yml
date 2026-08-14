@@ -21,7 +21,7 @@ targets:
         INFOPLIST_KEY_SUPABASE_URL: 'https://zaqbnznrfvapbgrjxskv.supabase.co'
         INFOPLIST_KEY_SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_ZA6Ra_Sfi20g26DKGNeWXw_V0Qco0UW'
         MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: 16
+        CURRENT_PROJECT_VERSION: 17
         DEVELOPMENT_TEAM: 359J9B4674
         CODE_SIGN_STYLE: Automatic
         SWIFT_EMIT_LOC_STRINGS: NO

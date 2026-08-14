@@ -1,0 +1,28 @@
+{
+  "scheme": "Evolv",
+  "version": "1.0",
+  "build": 17,
+  "bundleIdentifier": "com.app.evolv",
+  "branch": "release/build-17",
+  "candidateSourceCommit": "604f9b49277e65711df41877df90fbaaf85816e0",
+  "backend": {
+    "supabaseProjectId": "zaqbnznrfvapbgrjxskv",
+    "schemaVersion": 2,
+    "analysisVersion": 7,
+    "minimumAnalysisVersion": 4,
+    "consentVersions": [
+      "pilot-consent-v1",
+      "pilot-ongoing-v1"
+    ]
+  },
+  "purpose": "Invite-only TestFlight validation with full pilot access and no purchase requirement",
+  "candidateStatus": "pilot release candidate",
+  "validation": {
+    "exactCandidatePilotGate": "pending",
+    "thresholdSet": "engineering-v1",
+    "thresholdsValidated": false,
+    "humanValidation": "not required for the invite-only TestFlight pilot"
+  },
+  "testFlightStatus": "not uploaded",
+  "appStoreStatus": "not submitted"
+}
