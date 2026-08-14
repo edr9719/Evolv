@@ -5,6 +5,7 @@
   "bundleIdentifier": "com.app.evolv",
   "branch": "release/build-17",
   "candidateSourceCommit": "604f9b49277e65711df41877df90fbaaf85816e0",
+  "validatedCandidateCommit": "bafd2a39aea94ed53bec71070c800dcb86464e30",
   "backend": {
     "supabaseProjectId": "zaqbnznrfvapbgrjxskv",
     "schemaVersion": 2,
@@ -18,11 +19,14 @@
   "purpose": "Invite-only TestFlight validation with full pilot access and no purchase requirement",
   "candidateStatus": "pilot release candidate",
   "validation": {
-    "exactCandidatePilotGate": "pending",
+    "exactCandidatePilotGate": "passed",
     "thresholdSet": "engineering-v1",
     "thresholdsValidated": false,
     "humanValidation": "not required for the invite-only TestFlight pilot"
   },
-  "testFlightStatus": "not uploaded",
+  "uploaded": true,
+  "uploadedAt": "2026-08-14T04:22:37Z",
+  "uploadIdentifier": "34f7ed43-255c-4bdd-b2f4-327479076d0f",
+  "testFlightStatus": "uploaded; Apple processing",
   "appStoreStatus": "not submitted"
 }
