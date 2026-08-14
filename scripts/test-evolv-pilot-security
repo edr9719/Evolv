@@ -45,6 +45,10 @@ rg -q "revoke all on table storage.objects from public, anon, authenticated" "$M
 rg -q "public.*false" "$MIGRATION" || fail "pilot bucket is not private"
 rg -q "consent_object_mismatch" "$MIGRATION" "$API_SOURCE" || fail "consent/file constraint is missing"
 rg -q "createSignedUploadUrl" "$API_SOURCE" || fail "short-lived upload authorization is missing"
+rg -q "inspectPilotObject" "$API_SOURCE" || fail "supported storage object verification is missing"
+if rg -q '\.schema\("storage"\)' "$API_SOURCE"; then
+  fail "storage verification must not query the unexposed storage schema through PostgREST"
+fi
 rg -q "deleteParticipantData" "$API_SOURCE" "$SHARED_SOURCE" || fail "withdrawal deletion is missing"
 rg -q "pilot-ongoing-v1" "$ONGOING_MIGRATION" "$API_SOURCE" || fail "separate ongoing consent is missing"
 rg -q "pilot_consistency_required" "$ONGOING_MIGRATION" || fail "ongoing contribution prerequisite is missing"
@@ -134,6 +138,8 @@ expect_status 400 -X POST "${HEADERS[@]}" "${AUTH[@]}" --data-binary "@$TEST_DIR
 curl "${CURL_TIMEOUT[@]}" -sS -X POST "${HEADERS[@]}" "${AUTH[@]}" --data-binary "@$TEST_DIR/init.json" "$API_BASE/submissions/init" > "$TEST_DIR/initialized.json"
 REMOTE_SUBMISSION=$(jq -r '.submission_id' "$TEST_DIR/initialized.json")
 [[ "$REMOTE_SUBMISSION" != null ]] || fail "results-only initialization failed"
+jq -e '.uploads == []' "$TEST_DIR/initialized.json" >/dev/null ||
+  fail "results-only initialization unexpectedly created photo objects"
 curl "${CURL_TIMEOUT[@]}" -sS -X POST "${HEADERS[@]}" "${AUTH[@]}" --data-binary "@$TEST_DIR/init.json" "$API_BASE/submissions/init" > "$TEST_DIR/replayed.json"
 [[ "$(jq -r '.submission_id' "$TEST_DIR/replayed.json")" == "$REMOTE_SUBMISSION" ]] || fail "idempotent replay created a different submission"
 
@@ -159,6 +165,104 @@ jq -n --arg submission "$PROGRESS_REMOTE" --arg idem "$PROGRESS_IDEMPOTENCY" '{s
 expect_status 200 -X POST "${HEADERS[@]}" "${AUTH[@]}" --data-binary "@$TEST_DIR/progress-complete.json" "$API_BASE/submissions/complete"
 curl "${CURL_TIMEOUT[@]}" -sS -X POST "${HEADERS[@]}" "${AUTH[@]}" --data '{}' "$API_BASE/status" > "$TEST_DIR/status.json"
 jq -e '.completed_consistency_tests == 1 and .completed_progress_scans == 1' "$TEST_DIR/status.json" >/dev/null || fail "status did not classify consistency and progress submissions"
+
+stage "selected-photo upload, verification, and replay"
+head -c 64 /dev/zero | tr '\0' 'e' > "$TEST_DIR/ciphertext.bin"
+head -c 7 /dev/zero | tr '\0' 'x' > "$TEST_DIR/wrong-size.bin"
+CIPHERTEXT_BYTES=$(stat -f '%z' "$TEST_DIR/ciphertext.bin" 2>/dev/null || stat -c '%s' "$TEST_DIR/ciphertext.bin")
+CIPHERTEXT_SHA=$(shasum -a 256 "$TEST_DIR/ciphertext.bin" | awk '{print $1}')
+PHOTO_SESSION=$(uuidgen | tr '[:upper:]' '[:lower:]')
+PHOTO_SUBMISSION=$(uuidgen | tr '[:upper:]' '[:lower:]')
+PHOTO_IDEMPOTENCY=$(uuidgen | tr '[:upper:]' '[:lower:]')
+PHOTO_OBJECT=$(uuidgen | tr '[:upper:]' '[:lower:]')
+jq -n \
+  --arg session "$PHOTO_SESSION" --arg submission "$PHOTO_SUBMISSION" \
+  --arg idem "$PHOTO_IDEMPOTENCY" --arg object "$PHOTO_OBJECT" \
+  --arg sha "$CIPHERTEXT_SHA" --arg now "$NOW" \
+  --argjson bytes "$CIPHERTEXT_BYTES" --argjson analysis_version "$EXPECTED_ANALYSIS_VERSION" \
+  '{client_submission_id:$submission,idempotency_key:$idem,consent:{version:"pilot-consent-v1",adult_confirmed:true,share_scope:"results_and_selected_photos",accepted_at:$now},results:{schema_version:1,local_session_id:$session,session_result:"consistent",started_at:$now,completed_at:$now,app_build:"security-test",analysis_version:$analysis_version,threshold_set_identifier:"engineering-v1",device_model:"test",operating_system_version:"test",camera_position:"front",sets:[]},wrapped_key:{algorithm:"test-envelope"},objects:[{object_id:$object,set_number:1,pose:"front",sha256:$sha,byte_count:$bytes}]}' > "$TEST_DIR/photo-init.json"
+
+expect_status 401 -X POST "${HEADERS[@]}" \
+  -H 'x-evolv-participant-token: forged-participant-token-that-is-not-valid' \
+  --data-binary "@$TEST_DIR/photo-init.json" "$API_BASE/submissions/init"
+curl "${CURL_TIMEOUT[@]}" -sS -X POST "${HEADERS[@]}" "${AUTH[@]}" \
+  --data-binary "@$TEST_DIR/photo-init.json" "$API_BASE/submissions/init" > "$TEST_DIR/photo-initialized.json"
+PHOTO_REMOTE=$(jq -r '.submission_id' "$TEST_DIR/photo-initialized.json")
+jq -e '.uploads | length == 1 and .[0].already_uploaded == false and (.[0].signed_url | type == "string")' \
+  "$TEST_DIR/photo-initialized.json" >/dev/null || fail "initial photo upload authorization was invalid"
+
+curl "${CURL_TIMEOUT[@]}" -sS -X POST "${HEADERS[@]}" "${AUTH[@]}" \
+  --data-binary "@$TEST_DIR/photo-init.json" "$API_BASE/submissions/init" > "$TEST_DIR/photo-replay-before.json"
+[[ "$(jq -r '.submission_id' "$TEST_DIR/photo-replay-before.json")" == "$PHOTO_REMOTE" ]] ||
+  fail "pre-upload initialization replay changed submission identity"
+jq -e '.uploads | length == 1 and .[0].already_uploaded == false and (.[0].signed_url | type == "string")' \
+  "$TEST_DIR/photo-replay-before.json" >/dev/null || fail "pre-upload replay did not renew authorization"
+
+jq '.objects[0].pose="side"' "$TEST_DIR/photo-init.json" > "$TEST_DIR/photo-expanded-replay.json"
+expect_status 400 -X POST "${HEADERS[@]}" "${AUTH[@]}" \
+  --data-binary "@$TEST_DIR/photo-expanded-replay.json" "$API_BASE/submissions/init"
+
+jq -n --arg submission "$PHOTO_REMOTE" --arg idem "$PHOTO_IDEMPOTENCY" \
+  '{submission_id:$submission,idempotency_key:$idem}' > "$TEST_DIR/photo-complete.json"
+curl "${CURL_TIMEOUT[@]}" -sS -o "$TEST_DIR/photo-missing.json" -X POST \
+  "${HEADERS[@]}" "${AUTH[@]}" --data-binary "@$TEST_DIR/photo-complete.json" \
+  "$API_BASE/submissions/complete"
+jq -e '.code == "incomplete_upload"' "$TEST_DIR/photo-missing.json" >/dev/null ||
+  fail "missing selected photo did not block completion"
+
+PHOTO_UPLOAD_URL=$(jq -r '.uploads[0].signed_url' "$TEST_DIR/photo-replay-before.json")
+expect_status 200 -X PUT -H 'content-type: application/octet-stream' \
+  -H 'cache-control: no-store' -H 'x-upsert: false' \
+  --data-binary "@$TEST_DIR/ciphertext.bin" "$PHOTO_UPLOAD_URL"
+
+curl "${CURL_TIMEOUT[@]}" -sS -X POST "${HEADERS[@]}" "${AUTH[@]}" \
+  --data-binary "@$TEST_DIR/photo-init.json" "$API_BASE/submissions/init" > "$TEST_DIR/photo-replay-after.json"
+[[ "$(jq -r '.submission_id' "$TEST_DIR/photo-replay-after.json")" == "$PHOTO_REMOTE" ]] ||
+  fail "post-upload initialization replay changed submission identity"
+jq -e '.uploads | length == 1 and .[0].already_uploaded == true and (.[0] | has("signed_url") | not)' \
+  "$TEST_DIR/photo-replay-after.json" >/dev/null || fail "uploaded object was not recovered idempotently"
+
+curl "${CURL_TIMEOUT[@]}" -sS -X POST "${HEADERS[@]}" "${AUTH[@]}" \
+  --data-binary "@$TEST_DIR/photo-complete.json" "$API_BASE/submissions/complete" > "$TEST_DIR/photo-receipt-one.json"
+curl "${CURL_TIMEOUT[@]}" -sS -X POST "${HEADERS[@]}" "${AUTH[@]}" \
+  --data-binary "@$TEST_DIR/photo-complete.json" "$API_BASE/submissions/complete" > "$TEST_DIR/photo-receipt-two.json"
+[[ "$(jq -r '.receipt_code' "$TEST_DIR/photo-receipt-one.json")" == "$(jq -r '.receipt_code' "$TEST_DIR/photo-receipt-two.json")" ]] ||
+  fail "selected-photo completion replay changed the receipt"
+
+stage "wrong-size selected-photo recovery"
+WRONG_SESSION=$(uuidgen | tr '[:upper:]' '[:lower:]')
+WRONG_SUBMISSION=$(uuidgen | tr '[:upper:]' '[:lower:]')
+WRONG_IDEMPOTENCY=$(uuidgen | tr '[:upper:]' '[:lower:]')
+WRONG_OBJECT=$(uuidgen | tr '[:upper:]' '[:lower:]')
+jq --arg session "$WRONG_SESSION" --arg submission "$WRONG_SUBMISSION" \
+  --arg idem "$WRONG_IDEMPOTENCY" --arg object "$WRONG_OBJECT" \
+  '.client_submission_id=$submission | .idempotency_key=$idem | .results.local_session_id=$session | .objects[0].object_id=$object' \
+  "$TEST_DIR/photo-init.json" > "$TEST_DIR/wrong-init.json"
+curl "${CURL_TIMEOUT[@]}" -sS -X POST "${HEADERS[@]}" "${AUTH[@]}" \
+  --data-binary "@$TEST_DIR/wrong-init.json" "$API_BASE/submissions/init" > "$TEST_DIR/wrong-initialized.json"
+WRONG_REMOTE=$(jq -r '.submission_id' "$TEST_DIR/wrong-initialized.json")
+WRONG_UPLOAD_URL=$(jq -r '.uploads[0].signed_url' "$TEST_DIR/wrong-initialized.json")
+expect_status 200 -X PUT -H 'content-type: application/octet-stream' \
+  -H 'cache-control: no-store' -H 'x-upsert: false' \
+  --data-binary "@$TEST_DIR/wrong-size.bin" "$WRONG_UPLOAD_URL"
+jq -n --arg submission "$WRONG_REMOTE" --arg idem "$WRONG_IDEMPOTENCY" \
+  '{submission_id:$submission,idempotency_key:$idem}' > "$TEST_DIR/wrong-complete.json"
+curl "${CURL_TIMEOUT[@]}" -sS -o "$TEST_DIR/wrong-size-response.json" -X POST \
+  "${HEADERS[@]}" "${AUTH[@]}" --data-binary "@$TEST_DIR/wrong-complete.json" \
+  "$API_BASE/submissions/complete"
+jq -e '.code == "upload_size_mismatch"' "$TEST_DIR/wrong-size-response.json" >/dev/null ||
+  fail "wrong-size selected photo did not block completion"
+
+curl "${CURL_TIMEOUT[@]}" -sS -X POST "${HEADERS[@]}" "${AUTH[@]}" \
+  --data-binary "@$TEST_DIR/wrong-init.json" "$API_BASE/submissions/init" > "$TEST_DIR/wrong-retry.json"
+jq -e '.uploads | length == 1 and .[0].already_uploaded == false and (.[0].signed_url | type == "string")' \
+  "$TEST_DIR/wrong-retry.json" >/dev/null || fail "wrong-size object did not receive a safe replacement authorization"
+WRONG_RETRY_URL=$(jq -r '.uploads[0].signed_url' "$TEST_DIR/wrong-retry.json")
+expect_status 200 -X PUT -H 'content-type: application/octet-stream' \
+  -H 'cache-control: no-store' -H 'x-upsert: false' \
+  --data-binary "@$TEST_DIR/ciphertext.bin" "$WRONG_RETRY_URL"
+expect_status 200 -X POST "${HEADERS[@]}" "${AUTH[@]}" \
+  --data-binary "@$TEST_DIR/wrong-complete.json" "$API_BASE/submissions/complete"
 
 stage "participant deletion"
 jq -n --arg code "$DELETION_CODE" '{deletion_code:$code}' > "$TEST_DIR/delete.json"

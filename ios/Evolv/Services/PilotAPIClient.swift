@@ -105,7 +105,10 @@ struct PilotAPIClient {
     }
 
     func upload(ciphertext: Data, to authorization: PilotUploadAuthorization) async throws {
-        var request = URLRequest(url: authorization.signedURL)
+        guard !authorization.alreadyUploaded, let signedURL = authorization.signedURL else {
+            throw PilotStudyError.payloadRejected
+        }
+        var request = URLRequest(url: signedURL)
         request.httpMethod = "PUT"
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")

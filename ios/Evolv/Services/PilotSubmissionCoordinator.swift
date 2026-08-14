@@ -553,6 +553,12 @@ final class PilotSubmissionCoordinator {
             guard let authorization = authorizations[object.id] else {
                 throw PilotStudyError.payloadRejected
             }
+            if authorization.alreadyUploaded {
+                guard authorization.signedURL == nil else {
+                    throw PilotStudyError.payloadRejected
+                }
+                continue
+            }
             let ciphertext = try PilotStudyStore.readCiphertext(relativePath: object.relativeCiphertextPath)
             guard ciphertext.count == object.ciphertextByteCount,
                   PilotCrypto.sha256Hex(ciphertext) == object.ciphertextSHA256 else {

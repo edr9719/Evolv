@@ -325,7 +325,36 @@ struct PilotPoseResult: Codable, Hashable {
 
 struct PilotUploadAuthorization: Codable, Hashable {
     var objectID: UUID
-    var signedURL: URL
+    var signedURL: URL?
+    var alreadyUploaded: Bool
+
+    init(objectID: UUID, signedURL: URL?, alreadyUploaded: Bool = false) {
+        self.objectID = objectID
+        self.signedURL = signedURL
+        self.alreadyUploaded = alreadyUploaded
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        // PilotAPIClient applies convertFromSnakeCase before matching these
+        // keys, which normalizes object_id/signed_url to objectId/signedUrl.
+        case objectID = "objectId"
+        case signedURL = "signedUrl"
+        case alreadyUploaded
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        objectID = try container.decode(UUID.self, forKey: .objectID)
+        signedURL = try container.decodeIfPresent(URL.self, forKey: .signedURL)
+        alreadyUploaded = try container.decodeIfPresent(Bool.self, forKey: .alreadyUploaded) ?? false
+        guard alreadyUploaded != (signedURL != nil) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .alreadyUploaded,
+                in: container,
+                debugDescription: "Pilot upload state must be either already uploaded or authorized for upload."
+            )
+        }
+    }
 }
 
 struct PilotEnrollmentResponse: Codable, Hashable {

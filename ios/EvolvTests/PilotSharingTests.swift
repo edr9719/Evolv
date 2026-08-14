@@ -116,7 +116,8 @@ final class PilotSharingTests: XCTestCase {
             ciphertext: bytes,
             to: PilotUploadAuthorization(
                 objectID: UUID(),
-                signedURL: URL(string: "https://storage.example.test/object/upload/sign/test?token=opaque")!
+                signedURL: URL(string: "https://storage.example.test/object/upload/sign/test?token=opaque")!,
+                alreadyUploaded: false
             )
         )
         let request = try XCTUnwrap(spy.lastRequest)
@@ -124,6 +125,60 @@ final class PilotSharingTests: XCTestCase {
         XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/octet-stream")
         XCTAssertEqual(request.httpBody, bytes)
         XCTAssertNil(request.value(forHTTPHeaderField: "X-Evolv-Participant-Token"))
+    }
+
+    func testUploadAuthorizationDecodesMissingAndAlreadyUploadedStates() throws {
+        let objectID = UUID()
+        let decoder = JSONDecoder.pilot
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let upload = try decoder.decode(
+            PilotUploadAuthorization.self,
+            from: Data(#"{"object_id":"\#(objectID.uuidString)","signed_url":"https://storage.example.test/upload","already_uploaded":false}"#.utf8)
+        )
+        XCTAssertFalse(upload.alreadyUploaded)
+        XCTAssertNotNil(upload.signedURL)
+
+        let existing = try decoder.decode(
+            PilotUploadAuthorization.self,
+            from: Data(#"{"object_id":"\#(objectID.uuidString)","already_uploaded":true}"#.utf8)
+        )
+        XCTAssertTrue(existing.alreadyUploaded)
+        XCTAssertNil(existing.signedURL)
+    }
+
+    func testUploadAuthorizationRejectsAmbiguousServerState() {
+        let objectID = UUID()
+        let decoder = JSONDecoder.pilot
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        XCTAssertThrowsError(try decoder.decode(
+            PilotUploadAuthorization.self,
+            from: Data(#"{"object_id":"\#(objectID.uuidString)","already_uploaded":false}"#.utf8)
+        ))
+        XCTAssertThrowsError(try decoder.decode(
+            PilotUploadAuthorization.self,
+            from: Data(#"{"object_id":"\#(objectID.uuidString)","signed_url":"https://storage.example.test/upload","already_uploaded":true}"#.utf8)
+        ))
+    }
+
+    func testAlreadyUploadedObjectCannotBeSentToUploadTransport() async {
+        let spy = PilotTransportSpy()
+        let client = PilotAPIClient(
+            transport: spy,
+            baseURL: URL(string: "https://example.test/functions/v1/pilot-api")!,
+            publishableKey: "public-test-key",
+            networkAllowed: true
+        )
+
+        do {
+            try await client.upload(
+                ciphertext: Data([1, 2, 3]),
+                to: PilotUploadAuthorization(objectID: UUID(), signedURL: nil, alreadyUploaded: true)
+            )
+            XCTFail("An already-uploaded object should bypass upload transport")
+        } catch {
+            XCTAssertEqual(error as? PilotStudyError, .payloadRejected)
+        }
+        XCTAssertNil(spy.lastRequest)
     }
 
     func testCancelUsesParticipantAuthenticationAndExactSubmissionID() async throws {

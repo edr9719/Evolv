@@ -140,7 +140,7 @@ export EVOLV_PILOT_TEST_INVITE='DISPOSABLE-ONE-USE-CODE'
 scripts/test-evolv-pilot-security
 ```
 
-The live suite verifies anonymous denial, invite reuse, forged participant access, forged consent, consent/file mismatch, idempotent initialization and completion, and deletion-code invalidation. Also manually verify a selected-photo submission, an offline interruption after one object, retry, withdrawal, and token loss on a physical iPhone.
+The live suite verifies anonymous denial, invite reuse, forged participant access, forged consent, consent/file mismatch, results-only isolation, selected-photo upload and byte-size verification, missing/wrong-size rejection and recovery, idempotent initialization and completion, and deletion-code invalidation. Also manually verify an offline interruption after one object, withdrawal, and token loss on a physical iPhone.
 
 It also verifies that progress contributions require the separate `pilot-ongoing-v1` consent and are reported separately from consistency tests.
 

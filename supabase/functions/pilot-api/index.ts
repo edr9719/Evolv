@@ -17,6 +17,7 @@ import {
   sha256,
   validateResultsPayload,
 } from "../_shared/pilot.ts";
+import { inspectPilotObject } from "../_shared/pilot_uploads.ts";
 
 const allowedPoses = new Set(["front", "side", "back"]);
 
@@ -154,6 +155,13 @@ async function initialize(
   const maximumObjects = contributionType === "progress_scan" ? 3 : MAX_OBJECTS;
   if (objects.length > maximumObjects) throw new Error("invalid_objects");
   const seen = new Set<string>();
+  const requestedObjects: Array<{
+    objectID: string;
+    setNumber: number;
+    pose: string;
+    sha256: string;
+    byteCount: number;
+  }> = [];
   for (const raw of objects) {
     const item = object(raw, "invalid_object");
     const objectID = String(item.object_id || "");
@@ -170,6 +178,13 @@ async function initialize(
       throw new Error("invalid_object");
     }
     seen.add(key);
+    requestedObjects.push({
+      objectID,
+      setNumber: Number(item.set_number),
+      pose: String(item.pose),
+      sha256: String(item.sha256),
+      byteCount: Number(item.byte_count),
+    });
   }
   const scope = String(consent.share_scope || "");
   if (
@@ -200,20 +215,60 @@ async function initialize(
   if (error || !submissionID) throw new Error("submission_rejected");
   const { data: rows, error: objectError } = await client
     .from("pilot_objects")
-    .select("id,storage_path")
+    .select(
+      "id,storage_path,set_number,pose,ciphertext_sha256,ciphertext_byte_count",
+    )
     .eq("submission_id", submissionID);
   if (objectError || (rows || []).length !== objects.length) {
     throw new Error("submission_rejected");
   }
+  const requestedByID = new Map(
+    requestedObjects.map((item) => [item.objectID, item]),
+  );
+  for (const row of rows || []) {
+    const requested = requestedByID.get(row.id);
+    if (
+      !requested || requested.setNumber !== row.set_number ||
+      requested.pose !== row.pose ||
+      requested.sha256 !== row.ciphertext_sha256 ||
+      requested.byteCount !== row.ciphertext_byte_count
+    ) {
+      throw new Error("idempotency_conflict");
+    }
+  }
+
+  // Upload state machine for an authorized, allow-listed object:
+  // missing -> authorize upload; exact existing object -> skip re-upload;
+  // wrong-size existing object -> remove only that invalid path and authorize
+  // its replacement. Completion independently verifies every path and size.
+  const storage = client.storage.from(PHOTO_BUCKET);
   const uploads = [];
   for (const row of rows || []) {
+    const state = await inspectPilotObject(
+      storage,
+      PHOTO_BUCKET,
+      row.storage_path,
+      row.ciphertext_byte_count,
+    );
+    if (state.kind === "ready") {
+      uploads.push({ object_id: row.id, already_uploaded: true });
+      continue;
+    }
+    if (state.kind === "wrong_size") {
+      const { error: removeError } = await storage.remove([row.storage_path]);
+      if (removeError) throw new Error("upload_recovery_failed");
+    }
     const { data, error: signedError } = await client.storage
       .from(PHOTO_BUCKET)
       .createSignedUploadUrl(row.storage_path, { upsert: false });
     if (signedError || !data?.signedUrl) {
       throw new Error("upload_authorization_failed");
     }
-    uploads.push({ object_id: row.id, signed_url: data.signedUrl });
+    uploads.push({
+      object_id: row.id,
+      signed_url: data.signedUrl,
+      already_uploaded: false,
+    });
   }
   return json({ submission_id: submissionID, uploads });
 }
@@ -252,24 +307,20 @@ async function complete(
     throw new Error("incomplete_upload");
   }
   if ((expected || []).length > 0) {
-    const paths = expected!.map((row) => row.storage_path);
-    const { data: stored, error: storageError } = await client
-      .schema("storage")
-      .from("objects")
-      .select("name,metadata")
-      .eq("bucket_id", PHOTO_BUCKET)
-      .in("name", paths);
-    if (storageError || (stored || []).length !== expected!.length) {
+    const storage = client.storage.from(PHOTO_BUCKET);
+    const states = await Promise.all(expected!.map((item) =>
+      inspectPilotObject(
+        storage,
+        PHOTO_BUCKET,
+        item.storage_path,
+        item.ciphertext_byte_count,
+      )
+    ));
+    if (states.some((state) => state.kind === "missing")) {
       throw new Error("incomplete_upload");
     }
-    const storedByPath = new Map((stored || []).map((row) => [row.name, row]));
-    for (const item of expected!) {
-      const size = Number(
-        storedByPath.get(item.storage_path)?.metadata?.size || 0,
-      );
-      if (size !== item.ciphertext_byte_count) {
-        throw new Error("upload_size_mismatch");
-      }
+    if (states.some((state) => state.kind === "wrong_size")) {
+      throw new Error("upload_size_mismatch");
     }
   }
   const now = new Date().toISOString();
