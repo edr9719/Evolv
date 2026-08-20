@@ -24,6 +24,9 @@ Deno.serve(async (req) => {
     if (route === "participants/delete") {
       return await deleteParticipant(req, client);
     }
+    if (route === "enrollments/recover-orphan") {
+      return await recoverOrphanedEnrollment(req, client);
+    }
     if (route === "studies/close") return await closeStudy(req, client);
     if (route === "retention/run") return json(await applyRetention(client));
     return json({ code: "not_found" }, 404);
@@ -190,6 +193,36 @@ async function deleteParticipant(
     "researcher",
   );
   return json({ deleted: true });
+}
+
+async function recoverOrphanedEnrollment(
+  req: Request,
+  client: ReturnType<typeof serviceClient>,
+) {
+  const body = await parseJSON(req);
+  const studyID = String(body.study_id || "");
+  const participantID = String(body.participant_id || "");
+  const inviteCode = normalizeCode(body.invite_code);
+  if (
+    !/^[0-9a-f-]{36}$/i.test(studyID) ||
+    !/^[0-9a-f-]{36}$/i.test(participantID) ||
+    inviteCode.length < 16 || inviteCode.length > 64
+  ) {
+    throw new Error("invalid_orphan_recovery_request");
+  }
+  const { data, error } = await client.rpc(
+    "pilot_recover_orphaned_enrollment",
+    {
+      p_study_id: studyID,
+      p_invite_hash: await keyedHash(`invite:${inviteCode}`),
+      p_participant_id: participantID,
+      p_participant_reference_hash: await keyedHash(
+        `participant-reference:${participantID}`,
+      ),
+    },
+  );
+  if (error || data !== true) throw new Error("orphan_recovery_rejected");
+  return json({ recovered: true, invitation_reset: true });
 }
 
 async function closeStudy(

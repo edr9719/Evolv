@@ -32,6 +32,7 @@ def usage!
       scripts/evolv-pilot report DOWNLOAD_JSON [--output DIR]
       scripts/evolv-pilot stage DOWNLOAD_DIR
       scripts/evolv-pilot delete PARTICIPANT_ID
+      scripts/evolv-pilot recover-orphan STUDY_ID PARTICIPANT_ID INVITE_FILE
       scripts/evolv-pilot close STUDY_ID
       scripts/evolv-pilot retention
 
@@ -349,6 +350,19 @@ when "stage"
   puts "Staged #{photos.length} private fixtures at #{target} (git-ignored)."
 when "delete"
   puts JSON.pretty_generate(admin_request("participants/delete", { participant_id: ARGV.shift || usage! }))
+when "recover-orphan"
+  study_id = ARGV.shift || usage!
+  participant_id = ARGV.shift || usage!
+  invite_file = File.expand_path(ARGV.shift || usage!)
+  abort "Invite file must be a private regular file" unless File.file?(invite_file)
+  abort "Invite file must be owner-readable only" unless (File.stat(invite_file).mode & 0o077).zero?
+  invite_code = File.read(invite_file).lines.first.to_s.strip
+  abort "Invite file does not contain one invitation" if invite_code.empty?
+  puts JSON.pretty_generate(admin_request("enrollments/recover-orphan", {
+    study_id: study_id,
+    participant_id: participant_id,
+    invite_code: invite_code
+  }))
 when "close"
   puts JSON.pretty_generate(admin_request("studies/close", { study_id: ARGV.shift || usage! }))
 when "retention"

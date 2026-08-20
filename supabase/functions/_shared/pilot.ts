@@ -126,6 +126,7 @@ export async function authenticateParticipant(
     throw new Error("participant_unauthorized");
   }
   const tokenHash = await keyedHash(`token:${token}`);
+  const verifierHash = await keyedHash(`token-verifier:${await sha256(token)}`);
   await enforceRateLimit(
     client,
     await keyedHash("global:participant"),
@@ -136,11 +137,15 @@ export async function authenticateParticipant(
   const { data, error } = await client
     .from("pilot_participants")
     .select("id,study_id")
-    .eq("participant_token_hash", tokenHash)
+    .or(
+      `participant_token_hash.eq.${tokenHash},participant_token_hash.eq.${verifierHash}`,
+    )
     .eq("status", "active")
-    .maybeSingle();
-  if (error || !data) throw new Error("participant_unauthorized");
-  return data as { id: string; study_id: string };
+    .limit(2);
+  if (error || !data || data.length !== 1) {
+    throw new Error("participant_unauthorized");
+  }
+  return data[0] as { id: string; study_id: string };
 }
 
 export function validateResultsPayload(

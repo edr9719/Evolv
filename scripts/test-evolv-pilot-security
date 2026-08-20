@@ -6,6 +6,7 @@ REPO_ROOT=${SCRIPT_DIR:h}
 MIGRATION="$REPO_ROOT/supabase/migrations/20260810000100_pilot_validation.sql"
 ONGOING_MIGRATION="$REPO_ROOT/supabase/migrations/20260810000200_pilot_ongoing_contribution.sql"
 SERVICE_ROLE_MIGRATION="$REPO_ROOT/supabase/migrations/20260811000100_pilot_service_role_access.sql"
+ENROLLMENT_MIGRATION="$REPO_ROOT/supabase/migrations/20260820000100_pilot_enrollment_idempotency.sql"
 API_SOURCE="$REPO_ROOT/supabase/functions/pilot-api/index.ts"
 SHARED_SOURCE="$REPO_ROOT/supabase/functions/_shared/pilot.ts"
 ANALYSIS_STORE="$REPO_ROOT/ios/Evolv/Services/Analysis/AnalysisStore.swift"
@@ -53,6 +54,9 @@ rg -q "deleteParticipantData" "$API_SOURCE" "$SHARED_SOURCE" || fail "withdrawal
 rg -q "pilot-ongoing-v1" "$ONGOING_MIGRATION" "$API_SOURCE" || fail "separate ongoing consent is missing"
 rg -q "pilot_consistency_required" "$ONGOING_MIGRATION" || fail "ongoing contribution prerequisite is missing"
 rg -q "max_participants" "$ONGOING_MIGRATION" || fail "invite cohort capacity is missing"
+rg -q "pilot_redeem_invite_v2" "$ENROLLMENT_MIGRATION" "$API_SOURCE" || fail "retry-safe enrollment is missing"
+rg -q "pilot_validate_invite" "$ENROLLMENT_MIGRATION" "$API_SOURCE" || fail "non-consuming invitation validation is missing"
+rg -q "client_verifier_v2" "$ENROLLMENT_MIGRATION" "$SHARED_SOURCE" || fail "client-generated credential verification is missing"
 rg -q "to service_role" "$SERVICE_ROLE_MIGRATION" || fail "private pilot tables are unavailable to Edge Functions"
 rg -q "from public, anon, authenticated" "$SERVICE_ROLE_MIGRATION" || fail "private pilot sequences are exposed to client roles"
 rg -q 'route === "health"' "$API_SOURCE" || fail "deployment health contract is missing"
@@ -104,15 +108,29 @@ expect_status 401 -X POST "${HEADERS[@]}" --data '{}' "$API_BASE/status"
 stage "payload ceiling"
 expect_status_eventually 413 5 -X POST "${HEADERS[@]}" --data-binary "@$TEST_DIR/oversized.json" "$API_BASE/enroll"
 
-jq -n --arg code "$INVITE" '{invite_code:$code}' > "$TEST_DIR/enroll.json"
-stage "one-use enrollment"
+jq -n --arg code "$INVITE" '{invite_code:$code}' > "$TEST_DIR/validate.json"
+stage "non-consuming invitation validation"
+curl "${CURL_TIMEOUT[@]}" -sS -X POST "${HEADERS[@]}" --data-binary "@$TEST_DIR/validate.json" "$API_BASE/invites/validate" > "$TEST_DIR/validated.json"
+jq -e '.status == "valid" and (.study_name | type == "string")' "$TEST_DIR/validated.json" >/dev/null || fail "invitation validation did not return valid metadata"
+
+TOKEN=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\r\n')
+DELETION_CODE=$(openssl rand -hex 20 | tr '[:lower:]' '[:upper:]')
+ENROLLMENT_IDEMPOTENCY=$(uuidgen | tr '[:upper:]' '[:lower:]')
+TOKEN_VERIFIER=$(print -rn -- "$TOKEN" | shasum -a 256 | awk '{print $1}')
+RECOVERY_VERIFIER=$(print -rn -- "$DELETION_CODE" | shasum -a 256 | awk '{print $1}')
+jq -n --arg code "$INVITE" --arg idem "$ENROLLMENT_IDEMPOTENCY" \
+  --arg token_verifier "$TOKEN_VERIFIER" --arg recovery_verifier "$RECOVERY_VERIFIER" \
+  '{invite_code:$code,enrollment_idempotency_key:$idem,participant_token_verifier:$token_verifier,recovery_code_verifier:$recovery_verifier}' > "$TEST_DIR/enroll.json"
+stage "retry-safe one-use enrollment"
 curl "${CURL_TIMEOUT[@]}" -sS -X POST "${HEADERS[@]}" --data-binary "@$TEST_DIR/enroll.json" "$API_BASE/enroll" > "$TEST_DIR/enrolled.json"
-jq -e '.participant_token and .deletion_code and .participant_id' "$TEST_DIR/enrolled.json" >/dev/null || fail "enrollment did not return opaque credentials"
-TOKEN=$(jq -r '.participant_token' "$TEST_DIR/enrolled.json")
-DELETION_CODE=$(jq -r '.deletion_code' "$TEST_DIR/enrolled.json")
+jq -e '.participant_id and .study_id and (.participant_token | not) and (.deletion_code | not)' "$TEST_DIR/enrolled.json" >/dev/null || fail "enrollment did not return metadata-only outcome"
 AUTH=(-H "x-evolv-participant-token: $TOKEN")
 
-expect_status 409 -X POST "${HEADERS[@]}" --data-binary "@$TEST_DIR/enroll.json" "$API_BASE/enroll"
+curl "${CURL_TIMEOUT[@]}" -sS -X POST "${HEADERS[@]}" --data-binary "@$TEST_DIR/enroll.json" "$API_BASE/enroll" > "$TEST_DIR/enrolled-retry.json"
+[[ "$(jq -r '.participant_id' "$TEST_DIR/enrolled.json")" == "$(jq -r '.participant_id' "$TEST_DIR/enrolled-retry.json")" ]] || fail "enrollment replay changed participant identity"
+expect_status 409 -X POST "${HEADERS[@]}" --data-binary "@$TEST_DIR/validate.json" "$API_BASE/invites/validate"
+jq --arg idem "$(uuidgen | tr '[:upper:]' '[:lower:]')" '.enrollment_idempotency_key=$idem' "$TEST_DIR/enroll.json" > "$TEST_DIR/enroll-new-operation.json"
+expect_status 409 -X POST "${HEADERS[@]}" --data-binary "@$TEST_DIR/enroll-new-operation.json" "$API_BASE/enroll"
 expect_status 401 -X POST "${HEADERS[@]}" -H 'x-evolv-participant-token: forged-participant-token-that-is-not-valid' --data '{}' "$API_BASE/status"
 
 SESSION_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')

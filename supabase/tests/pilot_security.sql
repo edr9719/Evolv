@@ -1,10 +1,11 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(26);
+select plan(42);
 
 select has_table('public', 'pilot_participants', 'participant table exists');
 select has_table('public', 'pilot_submissions', 'submission table exists');
 select has_table('public', 'pilot_deletion_audit', 'deletion audit exists');
+select has_table('public', 'pilot_enrollment_recovery_audit', 'enrollment recovery audit exists');
 select ok((select relrowsecurity from pg_class where oid = 'public.pilot_participants'::regclass), 'participant RLS enabled');
 select ok((select relforcerowsecurity from pg_class where oid = 'public.pilot_participants'::regclass), 'participant RLS forced');
 select ok(not has_table_privilege('anon', 'public.pilot_participants', 'select'), 'anon cannot read participants');
@@ -24,6 +25,10 @@ select ok(
     )
   ),
   'service role can operate every private pilot table'
+);
+select ok(
+  has_table_privilege('service_role', 'public.pilot_enrollment_recovery_audit', 'select,insert,update,delete'),
+  'service role can operate the private enrollment recovery audit'
 );
 select ok(
   has_sequence_privilege('service_role', 'public.pilot_request_events_id_seq', 'usage')
@@ -151,6 +156,104 @@ select lives_ok(
 select throws_ok(
   $$select * from public.pilot_redeem_invite(repeat('6',64), repeat('9',64), repeat('0',64))$$,
   'P0001', 'study_full', 'concurrent-safe cohort ceiling rejects later enrollment'
+);
+
+insert into public.pilot_studies (id, name, activated_at, closes_at, max_participants)
+values ('10000000-0000-4000-8000-000000000003', 'Retry-safe enrollment pilot', now(), now() + interval '90 days', 4);
+insert into public.pilot_invites (study_id, invite_hash, expires_at)
+values
+  ('10000000-0000-4000-8000-000000000003', repeat('1', 64), now() + interval '7 days'),
+  ('10000000-0000-4000-8000-000000000003', repeat('2', 64), now() + interval '7 days');
+
+select is(
+  (select validation_status from public.pilot_validate_invite(repeat('1',64))),
+  'valid',
+  'invitation validation reports a valid unused invitation'
+);
+select is(
+  (select used_at from public.pilot_invites where invite_hash = repeat('1',64)),
+  null::timestamptz,
+  'invitation validation does not consume the invitation'
+);
+select lives_ok(
+  $$select * from public.pilot_redeem_invite_v2(
+    repeat('1',64), '70000000-0000-4000-8000-000000000001', repeat('3',64), repeat('4',64)
+  )$$,
+  'retry-safe enrollment creates a participant'
+);
+select lives_ok(
+  $$select * from public.pilot_redeem_invite_v2(
+    repeat('1',64), '70000000-0000-4000-8000-000000000001', repeat('3',64), repeat('4',64)
+  )$$,
+  'exact enrollment retry returns the existing outcome'
+);
+select is(
+  (select count(*) from public.pilot_participants
+    where enrollment_idempotency_key = '70000000-0000-4000-8000-000000000001'),
+  1::bigint,
+  'exact enrollment retry creates no duplicate participant'
+);
+select throws_ok(
+  $$select * from public.pilot_redeem_invite_v2(
+    repeat('2',64), '70000000-0000-4000-8000-000000000001', repeat('3',64), repeat('4',64)
+  )$$,
+  'P0001', 'enrollment_idempotency_conflict',
+  'one enrollment idempotency key cannot expand to another invitation'
+);
+select throws_ok(
+  $$select * from public.pilot_redeem_invite_v2(
+    repeat('1',64), '70000000-0000-4000-8000-000000000002', repeat('5',64), repeat('6',64)
+  )$$,
+  'P0001', 'invite_used',
+  'one-use invitation rejects a distinct enrollment operation'
+);
+select is(
+  (select validation_status from public.pilot_validate_invite(repeat('1',64))),
+  'invite_used',
+  'remote validation distinguishes an already-used invitation'
+);
+
+insert into public.pilot_studies (id, name, activated_at, closes_at, max_participants, status)
+values ('10000000-0000-4000-8000-000000000004', 'Closed validation pilot', now(), now() + interval '90 days', 1, 'closed');
+insert into public.pilot_invites (study_id, invite_hash, expires_at)
+values ('10000000-0000-4000-8000-000000000004', repeat('7', 64), now() + interval '7 days');
+select is(
+  (select validation_status from public.pilot_validate_invite(repeat('7',64))),
+  'study_closed',
+  'remote validation distinguishes a closed study'
+);
+
+select lives_ok(
+  $$select public.pilot_recover_orphaned_enrollment(
+    '10000000-0000-4000-8000-000000000003', repeat('1',64),
+    (select id from public.pilot_participants where enrollment_idempotency_key = '70000000-0000-4000-8000-000000000001'),
+    repeat('8',64)
+  )$$,
+  'guarded orphan recovery removes an enrollment with no downstream records'
+);
+select is(
+  (select count(*) from public.pilot_participants
+    where enrollment_idempotency_key = '70000000-0000-4000-8000-000000000001'),
+  0::bigint,
+  'orphan recovery removes the exact participant'
+);
+select is(
+  (select count(*) from public.pilot_invites
+    where invite_hash = repeat('1',64) and used_at is null and participant_id is null),
+  1::bigint,
+  'orphan recovery resets only the linked invitation'
+);
+select is(
+  (select count(*) from public.pilot_invites
+    where invite_hash = repeat('2',64) and used_at is null and participant_id is null),
+  1::bigint,
+  'orphan recovery leaves the neighboring invitation untouched'
+);
+select is(
+  (select count(*) from public.pilot_enrollment_recovery_audit
+    where participant_reference_hash = repeat('8',64)),
+  1::bigint,
+  'orphan recovery records a privacy-safe audit entry'
 );
 
 select * from finish();

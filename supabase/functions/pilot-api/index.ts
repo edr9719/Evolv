@@ -12,7 +12,6 @@ import {
   parseJSON,
   PHOTO_BUCKET,
   randomCode,
-  randomToken,
   serviceClient,
   sha256,
   validateResultsPayload,
@@ -29,12 +28,21 @@ type RedeemedInvite = {
   results_delete_after: string;
 };
 
+type ValidatedInvite = {
+  validation_status: string;
+  study_name: string | null;
+  pilot_closes_at: string | null;
+};
+
 Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ code: "method_not_allowed" }, 405);
   const route = routeName(req.url);
   try {
     const client = serviceClient();
     if (route === "health") return await health(client);
+    if (route === "invites/validate") {
+      return await validateInvitation(req, client);
+    }
     if (route === "enroll") return await enroll(req, client);
     if (route === "submissions/init") return await initialize(req, client);
     if (route === "submissions/complete") return await complete(req, client);
@@ -92,7 +100,16 @@ async function enroll(
   const body = await parseJSON(req);
   const inviteCode = normalizeCode(body.invite_code);
   if (inviteCode.length < 16 || inviteCode.length > 64) {
-    throw new Error("invite_unavailable");
+    throw new Error("invite_invalid");
+  }
+  const idempotencyKey = String(body.enrollment_idempotency_key || "");
+  const participantVerifier = String(body.participant_token_verifier || "");
+  const recoveryVerifier = String(body.recovery_code_verifier || "");
+  if (
+    !uuid(idempotencyKey) || !/^[0-9a-f]{64}$/.test(participantVerifier) ||
+    !/^[0-9a-f]{64}$/.test(recoveryVerifier)
+  ) {
+    throw new Error("invalid_enrollment_request");
   }
   const inviteHash = await keyedHash(`invite:${inviteCode}`);
   await enforceRateLimit(
@@ -103,21 +120,32 @@ async function enroll(
     30,
   );
   await enforceRateLimit(client, inviteHash, "enroll", 5, 30);
-  const participantToken = randomToken(32);
-  const deletionCode = randomCode(20);
-  const { data, error } = await client.rpc("pilot_redeem_invite", {
+  const { data, error } = await client.rpc("pilot_redeem_invite_v2", {
     p_invite_hash: inviteHash,
-    p_participant_token_hash: await keyedHash(`token:${participantToken}`),
+    p_enrollment_idempotency_key: idempotencyKey,
+    p_participant_token_hash: await keyedHash(
+      `token-verifier:${participantVerifier}`,
+    ),
     p_recovery_code_hash: await keyedHash(
-      `recovery:${normalizeCode(deletionCode)}`,
+      `recovery-verifier:${recoveryVerifier}`,
     ),
   }).single();
   if (error) {
-    if (error.message.includes("study_full")) throw new Error("study_full");
-    if (error.message.includes("study_closed")) throw new Error("study_closed");
-    throw new Error("invite_unavailable");
+    for (
+      const code of [
+        "study_full",
+        "study_closed",
+        "invite_invalid",
+        "invite_used",
+        "invite_expired",
+        "enrollment_idempotency_conflict",
+      ]
+    ) {
+      if (error.message.includes(code)) throw new Error(code);
+    }
+    throw new Error("enrollment_failed");
   }
-  if (!data) throw new Error("invite_unavailable");
+  if (!data) throw new Error("enrollment_failed");
   const redeemed = data as unknown as RedeemedInvite;
   return json({
     participant_id: redeemed.participant_id,
@@ -125,8 +153,38 @@ async function enroll(
     study_name: redeemed.study_name,
     pilot_closes_at: redeemed.pilot_closes_at,
     results_delete_after: redeemed.results_delete_after,
-    participant_token: participantToken,
-    deletion_code: deletionCode,
+  });
+}
+
+async function validateInvitation(
+  req: Request,
+  client: ReturnType<typeof serviceClient>,
+): Promise<Response> {
+  const body = await parseJSON(req);
+  const inviteCode = normalizeCode(body.invite_code);
+  if (inviteCode.length < 16 || inviteCode.length > 64) {
+    throw new Error("invite_invalid");
+  }
+  const inviteHash = await keyedHash(`invite:${inviteCode}`);
+  await enforceRateLimit(
+    client,
+    await keyedHash("global:invite-validation"),
+    "invite_validation_global",
+    1_000,
+    30,
+  );
+  await enforceRateLimit(client, inviteHash, "invite_validation", 20, 30);
+  const { data, error } = await client.rpc("pilot_validate_invite", {
+    p_invite_hash: inviteHash,
+  }).single();
+  if (error || !data) throw new Error("invite_invalid");
+  const validated = data as unknown as ValidatedInvite;
+  const status = String(validated.validation_status || "invite_invalid");
+  if (status !== "valid") throw new Error(status);
+  return json({
+    status: "valid",
+    study_name: validated.study_name,
+    pilot_closes_at: validated.pilot_closes_at,
   });
 }
 
@@ -433,6 +491,9 @@ async function deleteWithCode(
     throw new Error("deletion_code_unavailable");
   }
   const hash = await keyedHash(`recovery:${code}`);
+  const verifierHash = await keyedHash(
+    `recovery-verifier:${await sha256(code)}`,
+  );
   await enforceRateLimit(
     client,
     await keyedHash("global:delete"),
@@ -444,10 +505,10 @@ async function deleteWithCode(
   const { data } = await client
     .from("pilot_participants")
     .select("id")
-    .eq("recovery_code_hash", hash)
-    .maybeSingle();
-  if (!data) throw new Error("deletion_code_unavailable");
-  await deleteParticipantData(client, data.id, "recovery_code");
+    .or(`recovery_code_hash.eq.${hash},recovery_code_hash.eq.${verifierHash}`)
+    .limit(2);
+  if (!data || data.length !== 1) throw new Error("deletion_code_unavailable");
+  await deleteParticipantData(client, data[0].id, "recovery_code");
   return json({ deleted: true });
 }
 
@@ -503,8 +564,17 @@ function publicMessage(code: string): string {
   if (code === "study_full") {
     return "This pilot has reached its participant limit.";
   }
-  if (code === "invite_unavailable" || code === "study_closed") {
-    return "That invite code is invalid, expired, or already used.";
+  if (code === "invite_invalid" || code === "invite_unavailable") {
+    return "This invitation is not valid.";
+  }
+  if (code === "invite_used") {
+    return "This invitation has already been used.";
+  }
+  if (code === "invite_expired") {
+    return "This invitation has expired.";
+  }
+  if (code === "study_closed") {
+    return "This pilot is currently closed.";
   }
   if (code === "rate_limited") {
     return "Too many attempts. Please wait and try again.";
