@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-08-20T13:37:35Z",
+  "branch": "release/build-19",
+  "study_id": "699b319d-727a-4778-adce-5b540a727576",
+  "reason": "Build 18 enrollment response could not be decoded after the server transaction committed",
+  "preconditions": {
+    "orphan_participants": 1,
+    "submissions": 0,
+    "first_invitation": "used",
+    "remaining_invitations": "four unused"
+  },
+  "operation": "guarded atomic orphan removal and exact linked-invitation reset",
+  "result": {
+    "orphan_participants": 0,
+    "submissions": 0,
+    "first_invitation": "unused",
+    "remaining_invitations": "four remained unused",
+    "founder_device_data_changed": false
+  },
+  "sensitive_values_recorded": false
+}
