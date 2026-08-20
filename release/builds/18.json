@@ -5,6 +5,7 @@
   "bundleIdentifier": "com.app.evolv",
   "branch": "release/build-18",
   "candidateSourceCommit": "6e70c208cc1d0facc6c2907c7cd6aaa5b8cdebb3",
+  "validatedCandidateCommit": "803a9f757897d89742909c75809abe5134028b83",
   "backend": {
     "supabaseProjectId": "zaqbnznrfvapbgrjxskv",
     "schemaVersion": 2,
@@ -18,11 +19,21 @@
   "purpose": "Founder TestFlight acceptance of enrollment-first pilot access, downstream-analyzable Set 1 gating, targeted retakes, and actionable evidence diagnostics",
   "candidateStatus": "founder-acceptance TestFlight candidate",
   "validation": {
-    "exactCandidatePilotGate": "pending",
+    "exactCandidatePilotGate": "passed",
+    "simulatorTests": "117 total; 110 passed; 7 physical-only skipped; 0 failed",
+    "uiTests": "4 passed; 0 failed",
+    "physicalDeviceTests": "117 passed; 0 failed",
+    "setOneDownstreamPreflight": "passed",
+    "privacySecurityGates": "passed",
+    "releaseBuild": "passed",
+    "hostedBackendHealth": "schema 2; analysis 7; minimum analysis 4; expected consent versions",
     "thresholdSet": "engineering-v1",
     "thresholdsValidated": false,
     "founderAcceptance": "pending"
   },
-  "testFlightStatus": "not uploaded",
+  "uploaded": true,
+  "uploadedAt": "2026-08-20T06:47:24Z",
+  "uploadIdentifier": "e23c4fab-ac7c-4132-9232-38c64c16e953",
+  "testFlightStatus": "uploaded; Apple processing",
   "appStoreStatus": "not submitted"
 }
