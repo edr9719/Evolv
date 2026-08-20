@@ -98,7 +98,7 @@ struct SettingsView: View {
                     .foregroundStyle(EvolvTheme.accent)
             }
             VStack(alignment: .leading, spacing: 3) {
-                Text("Build 17 TestFlight")
+                Text("Founder TestFlight pilot")
                     .font(.system(size: 15.5, weight: .semibold, design: .rounded))
                     .foregroundStyle(EvolvTheme.text)
                 Text(Build17PilotConfiguration.accessMessage)
