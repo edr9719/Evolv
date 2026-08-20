@@ -41,6 +41,7 @@ targets:
           defaultPlan: true
         - path: Evolv-Vision-Device.xctestplan
         - path: Evolv-UI.xctestplan
+        - path: Evolv-Hosted-Enrollment.xctestplan
       environmentVariables:
         'SUPABASE_ANON_KEY': 'sb_publishable_ZA6Ra_Sfi20g26DKGNeWXw_V0Qco0UW'
         'SUPABASE_PUBLISHABLE_KEY': 'sb_publishable_ZA6Ra_Sfi20g26DKGNeWXw_V0Qco0UW'

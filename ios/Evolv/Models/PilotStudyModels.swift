@@ -335,11 +335,9 @@ struct PilotUploadAuthorization: Codable, Hashable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        // PilotAPIClient applies convertFromSnakeCase before matching these
-        // keys, which normalizes object_id/signed_url to objectId/signedUrl.
-        case objectID = "objectId"
-        case signedURL = "signedUrl"
-        case alreadyUploaded
+        case objectID = "object_id"
+        case signedURL = "signed_url"
+        case alreadyUploaded = "already_uploaded"
     }
 
     init(from decoder: Decoder) throws {
@@ -365,11 +363,65 @@ struct PilotEnrollmentResponse: Codable, Hashable {
     var resultsDeleteAfter: Date
     var participantToken: String
     var deletionCode: String
+
+    private enum CodingKeys: String, CodingKey {
+        case participantID = "participant_id"
+        case studyID = "study_id"
+        case studyName = "study_name"
+        case pilotClosesAt = "pilot_closes_at"
+        case resultsDeleteAfter = "results_delete_after"
+        case participantToken = "participant_token"
+        case deletionCode = "deletion_code"
+    }
+}
+
+struct PilotEnrollmentMetadataResponse: Codable, Hashable {
+    var participantID: UUID
+    var studyID: UUID
+    var studyName: String
+    var pilotClosesAt: Date
+    var resultsDeleteAfter: Date
+
+    private enum CodingKeys: String, CodingKey {
+        case participantID = "participant_id"
+        case studyID = "study_id"
+        case studyName = "study_name"
+        case pilotClosesAt = "pilot_closes_at"
+        case resultsDeleteAfter = "results_delete_after"
+    }
+}
+
+struct PilotEnrollmentAttempt: Codable, Hashable {
+    var normalizedInviteCode: String
+    var idempotencyKey: UUID
+    var participantToken: String
+    var deletionCode: String
+}
+
+enum PilotInvitationStatus: String, Codable, Hashable {
+    case valid
+}
+
+struct PilotInvitationValidation: Codable, Hashable {
+    var status: PilotInvitationStatus
+    var studyName: String
+    var pilotClosesAt: Date
+
+    private enum CodingKeys: String, CodingKey {
+        case status
+        case studyName = "study_name"
+        case pilotClosesAt = "pilot_closes_at"
+    }
 }
 
 struct PilotSubmissionInitialization: Codable, Hashable {
     var submissionID: UUID
     var uploads: [PilotUploadAuthorization]
+
+    private enum CodingKeys: String, CodingKey {
+        case submissionID = "submission_id"
+        case uploads
+    }
 }
 
 struct PilotSubmissionReceipt: Codable, Hashable {
@@ -377,12 +429,26 @@ struct PilotSubmissionReceipt: Codable, Hashable {
     var receiptCode: String
     var photoDeleteAt: Date?
     var resultsDeleteAt: Date
+
+    private enum CodingKeys: String, CodingKey {
+        case submissionID = "submission_id"
+        case receiptCode = "receipt_code"
+        case photoDeleteAt = "photo_delete_at"
+        case resultsDeleteAt = "results_delete_at"
+    }
 }
 
 enum PilotStudyError: LocalizedError, Equatable {
     case unavailable
     case invalidInvite
+    case inviteAlreadyUsed
+    case inviteExpired
+    case pilotClosed
     case pilotFull
+    case rateLimited
+    case offline
+    case enrollmentRetryable
+    case responseInvalid
     case consentRequired
     case adultConfirmationRequired
     case photoSelectionRequired
@@ -399,8 +465,17 @@ enum PilotStudyError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .unavailable: return "Pilot sharing is unavailable right now. Please try again later."
-        case .invalidInvite: return "That invite code is invalid, expired, or has already been used."
+        case .invalidInvite: return "This invitation isn't valid. Check the code and try again."
+        case .inviteAlreadyUsed: return "This invitation has already been used."
+        case .inviteExpired: return "This invitation has expired."
+        case .pilotClosed: return "This pilot is currently closed."
         case .pilotFull: return "This pilot has reached its participant limit."
+        case .rateLimited: return "Too many attempts. Wait a moment and try again."
+        case .offline: return "You're offline. Check your connection and try again."
+        case .enrollmentRetryable:
+            return "We couldn't finish joining the pilot. Your invitation was not lost — try again."
+        case .responseInvalid:
+            return "Evolv received an unexpected pilot response. Your invitation was not lost — try again."
         case .consentRequired: return "Choose what you want to share before continuing."
         case .adultConfirmationRequired: return "You must confirm that you are 18 or older to join this pilot."
         case .photoSelectionRequired: return "Select at least one photo, or switch to Results only."

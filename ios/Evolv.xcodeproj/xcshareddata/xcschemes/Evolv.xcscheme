@@ -40,6 +40,9 @@
          <TestPlanReference
             reference = "container:Evolv-UI.xctestplan">
          </TestPlanReference>
+         <TestPlanReference
+            reference = "container:Evolv-Hosted-Enrollment.xctestplan">
+         </TestPlanReference>
       </TestPlans>
       <MacroExpansion>
          <BuildableReference

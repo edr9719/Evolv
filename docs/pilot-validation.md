@@ -144,6 +144,23 @@ The live suite verifies anonymous denial, invite reuse, forged participant acces
 
 It also verifies that progress contributions require the separate `pilot-ongoing-v1` consent and are reported separately from consistency tests.
 
+Build 19 adds a mandatory production-client enrollment test. It creates only
+disposable studies, runs the real Swift client through non-consuming validation,
+a deliberately lost successful response, exact retry, Keychain-equivalent and
+local enrollment persistence, one-use enforcement, submission authentication,
+and recovery-code cleanup:
+
+```sh
+scripts/evolv-hosted-enrollment-e2e
+```
+
+The iPhone generates its participant and recovery secrets before enrollment and
+sends only SHA-256 verifiers. Supabase stores keyed hashes of those verifiers.
+The pending operation (including its idempotency key and original secrets) is
+kept in the device-only Keychain until both credentials and the active local
+enrollment have been saved. Neither raw secrets nor invitation codes may appear
+in logs or tracked test results.
+
 Do not distribute externally until all of these are true:
 
 - RLS and private-bucket static gates pass.
@@ -190,6 +207,19 @@ scripts/evolv-pilot status STUDY_ID
 ```
 
 Closing immediately deletes study photo objects while retaining structured results until their 12-month deletion dates. Participant withdrawal or researcher deletion removes both immediately. The status and deletion-audit counts must match the expected submission/object counts after every cleanup operation.
+
+An enrollment that was committed before Build 19 but whose response was lost
+may be recovered only when it has no consent, session, submission, or photo
+records. The guarded command requires the exact study, exact participant, and a
+permission-restricted file whose first line is the exact invitation:
+
+```sh
+scripts/evolv-pilot recover-orphan STUDY_ID PARTICIPANT_ID PRIVATE_INVITE_FILE
+```
+
+The database atomically deletes that participant, resets only its linked
+invitation, and writes a keyed participant-reference audit entry. It refuses to
+operate if any downstream record exists or if the invitation linkage differs.
 
 ## Troubleshooting
 

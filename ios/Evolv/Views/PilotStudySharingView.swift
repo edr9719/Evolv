@@ -10,6 +10,7 @@ struct PilotEnrollmentSheet: View {
     @State private var adultConfirmed = false
     @State private var showDetails = false
     @State private var errorMessage: String?
+    @State private var validatedInvitation: PilotInvitationValidation?
 
     let onEnrolled: (() -> Void)?
 
@@ -62,6 +63,7 @@ struct PilotEnrollmentSheet: View {
                         Button("Back") {
                             step = Step(rawValue: step.rawValue - 1) ?? .explanation
                             errorMessage = nil
+                            if step == .invite { validatedInvitation = nil }
                         }
                         .tint(EvolvTheme.accent)
                     }
@@ -153,10 +155,20 @@ struct PilotEnrollmentSheet: View {
                         .padding(16)
                         .accessibilityIdentifier("pilot.enrollment.invite-code")
                 }
+                Text("Checking the invitation does not use it. It is used only after you review sharing and tap Join pilot.")
+                    .font(.system(size: 11.5, design: .rounded))
+                    .foregroundStyle(EvolvTheme.textFaint)
+                    .lineSpacing(2)
             }
 
         case .sharing:
             VStack(alignment: .leading, spacing: 12) {
+                if let validatedInvitation {
+                    Label("Invitation verified for \(validatedInvitation.studyName)", systemImage: "checkmark.shield.fill")
+                        .font(.system(size: 12.5, weight: .semibold, design: .rounded))
+                        .foregroundStyle(EvolvTheme.accent)
+                        .accessibilityIdentifier("pilot.enrollment.invitation-verified")
+                }
                 Text("Choose a starting preference. After the test, you can change it before sharing.")
                     .font(.system(size: 13.5, design: .rounded))
                     .foregroundStyle(EvolvTheme.textMuted)
@@ -190,14 +202,18 @@ struct PilotEnrollmentSheet: View {
             }
         case .invite:
             EvolvPrimaryButton(
-                title: inviteCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                title: coordinator.isWorking
+                    ? "Checking invitation…"
+                    : inviteCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     ? "Enter your invite code"
                     : "Continue to sharing choice",
                 icon: "arrow.right",
-                enabled: !inviteCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                enabled: !coordinator.isWorking
+                    && !inviteCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ) {
-                step = .sharing
+                validateInvitation()
             }
+            .accessibilityIdentifier("pilot.enrollment.validate-invitation")
         case .sharing:
             EvolvPrimaryButton(
                 title: coordinator.isWorking ? "Joining…" : "Join pilot",
@@ -283,6 +299,19 @@ struct PilotEnrollmentSheet: View {
                 onEnrolled?()
                 dismiss()
             } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func validateInvitation() {
+        errorMessage = nil
+        Task {
+            do {
+                validatedInvitation = try await coordinator.validateInvitation(inviteCode)
+                step = .sharing
+            } catch {
+                validatedInvitation = nil
                 errorMessage = error.localizedDescription
             }
         }

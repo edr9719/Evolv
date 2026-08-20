@@ -144,6 +144,18 @@ enum PilotProgressResultsBuilder {
     }
 }
 
+protocol PilotEnrollmentPersisting {
+    func loadEnrollment() -> PilotLocalEnrollment?
+    func saveEnrollment(_ enrollment: PilotLocalEnrollment?) throws
+}
+
+struct PilotEnrollmentStore: PilotEnrollmentPersisting {
+    func loadEnrollment() -> PilotLocalEnrollment? { PilotStudyStore.loadEnrollment() }
+    func saveEnrollment(_ enrollment: PilotLocalEnrollment?) throws {
+        try PilotStudyStore.saveEnrollment(enrollment)
+    }
+}
+
 @MainActor
 @Observable
 final class PilotSubmissionCoordinator {
@@ -156,6 +168,7 @@ final class PilotSubmissionCoordinator {
 
     private let api: PilotAPIClient
     private let secrets: PilotSecretStoring
+    private let enrollmentStore: PilotEnrollmentPersisting
 
     var hasCompletedConsistencySubmission: Bool {
         submissions.contains {
@@ -167,11 +180,13 @@ final class PilotSubmissionCoordinator {
 
     init(
         api: PilotAPIClient = PilotAPIClient(),
-        secrets: PilotSecretStoring = PilotKeychainStore()
+        secrets: PilotSecretStoring = PilotKeychainStore(),
+        enrollmentStore: PilotEnrollmentPersisting = PilotEnrollmentStore()
     ) {
         self.api = api
         self.secrets = secrets
-        self.enrollment = PilotStudyStore.loadEnrollment()
+        self.enrollmentStore = enrollmentStore
+        self.enrollment = enrollmentStore.loadEnrollment()
         self.submissions = PilotStudyStore.loadSubmissions()
     }
 
@@ -193,36 +208,72 @@ final class PilotSubmissionCoordinator {
         guard consent.adultConfirmed else { throw PilotStudyError.adultConfirmationRequired }
         isWorking = true
         defer { isWorking = false }
-        let response = try await api.enroll(inviteCode: inviteCode)
-        do {
-            try secrets.save(
-                participantToken: response.participantToken,
-                deletionCode: response.deletionCode
-            )
-            let local = PilotLocalEnrollment(
-                participantID: response.participantID,
-                studyID: response.studyID,
-                studyName: response.studyName,
-                enrolledAt: Date(),
-                pilotClosesAt: response.pilotClosesAt,
-                resultsDeleteAfter: response.resultsDeleteAfter,
-                consent: consent,
-                status: .active
-            )
-            try PilotStudyStore.saveEnrollment(local)
-            enrollment = local
-            lastMessage = "Pilot access saved on this iPhone."
-        } catch {
-            try? secrets.deleteAll()
-            throw error
+        let normalized = PilotAPIClient.normalizeInviteCode(inviteCode)
+        let attempt: PilotEnrollmentAttempt
+        if let saved = try secrets.enrollmentAttempt() {
+            guard saved.normalizedInviteCode == normalized else {
+                throw PilotStudyError.serverRejected(
+                    "Finish retrying the invitation already saved on this iPhone before using a different code."
+                )
+            }
+            attempt = saved
+        } else {
+            attempt = try PilotAPIClient.makeEnrollmentAttempt(inviteCode: normalized)
+            // This write must complete before the request. It is the recovery
+            // anchor if the server commits but the response is interrupted.
+            try secrets.saveEnrollmentAttempt(attempt)
         }
+        let response = try await api.enroll(attempt: attempt)
+        try secrets.save(
+            participantToken: response.participantToken,
+            deletionCode: response.deletionCode
+        )
+        let local = PilotLocalEnrollment(
+            participantID: response.participantID,
+            studyID: response.studyID,
+            studyName: response.studyName,
+            enrolledAt: Date(),
+            pilotClosesAt: response.pilotClosesAt,
+            resultsDeleteAfter: response.resultsDeleteAfter,
+            consent: consent,
+            status: .active
+        )
+        try enrollmentStore.saveEnrollment(local)
+        enrollment = local
+        // Cleanup should not turn a fully persisted enrollment into a visible
+        // failure. deleteAll() also clears a rare stale attempt on withdrawal.
+        try? secrets.deleteEnrollmentAttempt()
+        lastMessage = "Pilot access saved on this iPhone."
+    }
+
+    func validateInvitation(_ inviteCode: String) async throws -> PilotInvitationValidation {
+        isWorking = true
+        defer { isWorking = false }
+        #if DEBUG
+        if let fixture = ProcessInfo.processInfo.environment["EVOLV_UI_TEST_INVITE_VALIDATION"] {
+            switch fixture {
+            case "valid":
+                return PilotInvitationValidation(
+                    status: .valid,
+                    studyName: "UI test pilot",
+                    pilotClosesAt: Date().addingTimeInterval(86_400)
+                )
+            case "used": throw PilotStudyError.inviteAlreadyUsed
+            case "closed": throw PilotStudyError.pilotClosed
+            case "invalid": throw PilotStudyError.invalidInvite
+            case "offline": throw PilotStudyError.offline
+            default: break
+            }
+        }
+        #endif
+        return try await api.validateInvitation(inviteCode: inviteCode)
     }
 
     func updateConsent(_ consent: PilotConsent) throws {
         guard consent.adultConfirmed else { throw PilotStudyError.adultConfirmationRequired }
         guard var enrollment else { throw PilotStudyError.consentRequired }
         enrollment.consent = consent
-        try PilotStudyStore.saveEnrollment(enrollment)
+        try enrollmentStore.saveEnrollment(enrollment)
         self.enrollment = enrollment
     }
 
@@ -239,7 +290,7 @@ final class PilotSubmissionCoordinator {
             mode: mode,
             acceptedAt: now
         )
-        try PilotStudyStore.saveEnrollment(enrollment)
+        try enrollmentStore.saveEnrollment(enrollment)
         self.enrollment = enrollment
         lastMessage = mode == .resultsOnly
             ? "Future progress-scan results will be shared. Photos remain on this iPhone."
@@ -253,7 +304,7 @@ final class PilotSubmissionCoordinator {
         // Revoke future authorization locally first. A network failure must never
         // leave automatic contribution enabled on this iPhone.
         enrollment.ongoingConsent = nil
-        try PilotStudyStore.saveEnrollment(enrollment)
+        try enrollmentStore.saveEnrollment(enrollment)
         self.enrollment = enrollment
         let pendingProgress = submissions.filter {
             $0.status != .completed
@@ -431,7 +482,7 @@ final class PilotSubmissionCoordinator {
         try await api.withdraw(participantToken: token)
         if var local = enrollment {
             local.status = .withdrawn
-            try PilotStudyStore.saveEnrollment(local)
+            try enrollmentStore.saveEnrollment(local)
             enrollment = local
         }
         try secrets.deleteParticipantToken()
@@ -622,7 +673,7 @@ final class PilotSubmissionCoordinator {
     }
 
     private func reload() {
-        enrollment = PilotStudyStore.loadEnrollment()
+        enrollment = enrollmentStore.loadEnrollment()
         submissions = PilotStudyStore.loadSubmissions()
     }
 

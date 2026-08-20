@@ -58,11 +58,69 @@ final class EvolvPilotFlowUITests: XCTestCase {
         XCTAssertTrue(element("pilot.enrollment.explanation").waitForExistence(timeout: 3))
     }
 
-    private func launch(scenario: String) {
+    func testInvitationIsValidatedBeforeSharingChoiceWithoutBeingJoined() {
+        launch(scenario: "unenrolled", inviteValidation: "valid")
+        openHelpTest()
+        element("validation.pilot.join-required").tap()
+        advanceToInvitation()
+
+        let code = element("pilot.enrollment.invite-code")
+        code.tap()
+        code.typeText("ABCDE12345ABCDE12345")
+        element("pilot.enrollment.validate-invitation").tap()
+
+        XCTAssertTrue(element("pilot.enrollment.sharing-choice").waitForExistence(timeout: 3))
+        XCTAssertTrue(element("pilot.enrollment.join").exists)
+    }
+
+    func testUsedInvitationShowsActionableMessageAndDoesNotAdvance() {
+        assertInvitationFailure(fixture: "used", message: "This invitation has already been used.")
+    }
+
+    func testInvalidInvitationShowsActionableMessageAndDoesNotAdvance() {
+        assertInvitationFailure(fixture: "invalid", message: "This invitation isn't valid. Check the code and try again.")
+    }
+
+    func testClosedPilotShowsActionableMessageAndDoesNotAdvance() {
+        assertInvitationFailure(fixture: "closed", message: "This pilot is currently closed.")
+    }
+
+    func testOfflineInvitationCheckShowsActionableMessageAndDoesNotAdvance() {
+        assertInvitationFailure(fixture: "offline", message: "You're offline. Check your connection and try again.")
+    }
+
+    private func assertInvitationFailure(fixture: String, message: String) {
+        launch(scenario: "unenrolled", inviteValidation: fixture)
+        openHelpTest()
+        element("validation.pilot.join-required").tap()
+        advanceToInvitation()
+
+        let code = element("pilot.enrollment.invite-code")
+        code.tap()
+        code.typeText("ABCDE12345ABCDE12345")
+        element("pilot.enrollment.validate-invitation").tap()
+
+        XCTAssertTrue(app.staticTexts[message].waitForExistence(timeout: 3))
+        XCTAssertFalse(element("pilot.enrollment.sharing-choice").exists)
+    }
+
+    private func launch(scenario: String, inviteValidation: String? = nil) {
         app.launchEnvironment["EVOLV_UI_TEST_SCENARIO"] = scenario
         app.launchEnvironment["EVOLV_ALLOW_NETWORK"] = "0"
+        if let inviteValidation {
+            app.launchEnvironment["EVOLV_UI_TEST_INVITE_VALIDATION"] = inviteValidation
+        }
         app.launch()
         XCTAssertTrue(app.buttons["home.settings"].waitForExistence(timeout: 5))
+    }
+
+    private func advanceToInvitation() {
+        element("pilot.enrollment.continue").tap()
+        let consent = element("pilot.enrollment.adult-consent")
+        XCTAssertTrue(consent.waitForExistence(timeout: 2))
+        consent.tap()
+        app.buttons["Continue to invitation"].tap()
+        XCTAssertTrue(element("pilot.enrollment.invite-code").waitForExistence(timeout: 2))
     }
 
     private func openSettings() {

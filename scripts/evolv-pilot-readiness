@@ -168,7 +168,8 @@ run_local_gates() {
   ruby -c "$SCRIPT_DIR/evolv-longitudinal-validation" >/dev/null
   zsh -n "$SCRIPT_DIR/test-evolv-analysis" "$SCRIPT_DIR/test-evolv-pilot-security" \
     "$SCRIPT_DIR/evolv-phase5-gate" "$SCRIPT_DIR/test-evolv-validation-stats" \
-    "$SCRIPT_DIR/test-evolv-longitudinal-validation"
+    "$SCRIPT_DIR/test-evolv-longitudinal-validation" \
+    "$SCRIPT_DIR/evolv-hosted-enrollment-e2e"
   "$SCRIPT_DIR/evolv-fixture-audit"
   "$SCRIPT_DIR/test-evolv-validation-stats"
   "$SCRIPT_DIR/test-evolv-longitudinal-validation"

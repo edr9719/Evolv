@@ -1,0 +1,131 @@
+#!/bin/zsh
+set -euo pipefail
+
+SCRIPT_DIR=${0:A:h}
+REPO_ROOT=${SCRIPT_DIR:h}
+PROJECT_REF=zaqbnznrfvapbgrjxskv
+PRIVATE_ENV="$REPO_ROOT/private/pilot/backend.env"
+ADMIN_URL="https://$PROJECT_REF.supabase.co/functions/v1/pilot-admin"
+TEST_DIR=$(mktemp -d)
+VALID_STUDY=""
+CLOSED_STUDY=""
+XCTESTRUN=""
+
+fail() { print -u2 "Hosted enrollment E2E failed: $1"; exit 1; }
+
+[[ -f "$PRIVATE_ENV" ]] || fail "private pilot backend credentials are unavailable"
+[[ "$(stat -f '%Lp' "$PRIVATE_ENV")" == "600" ]] || fail "private pilot backend credentials must have mode 600"
+while IFS='=' read -r name value; do
+  case "$name" in
+    PILOT_ADMIN_SECRET) typeset -gx EVOLV_PILOT_ADMIN_SECRET="$value" ;;
+    "") ;;
+  esac
+done < "$PRIVATE_ENV"
+[[ ${#EVOLV_PILOT_ADMIN_SECRET} -ge 32 ]] || fail "pilot admin credential is unavailable"
+ADMIN_CURL_CONFIG="$TEST_DIR/admin-curl.conf"
+{
+  print -r -- "header = \"authorization: Bearer $EVOLV_PILOT_ADMIN_SECRET\""
+  print -r -- 'header = "content-type: application/json"'
+} > "$ADMIN_CURL_CONFIG"
+chmod 600 "$ADMIN_CURL_CONFIG"
+
+admin_request() {
+  local route=$1
+  local input=$2
+  local output=$3
+  local http_status
+  http_status=$(curl --http1.1 --connect-timeout 10 --max-time 60 -sS \
+    -o "$output" -w '%{http_code}' -X POST \
+    --config "$ADMIN_CURL_CONFIG" \
+    --data-binary "@$input" "$ADMIN_URL/$route")
+  [[ "$http_status" == 2* ]] || fail "researcher setup request failed with HTTP $http_status"
+}
+
+cleanup() {
+  if [[ -n "$XCTESTRUN" && -f "$XCTESTRUN" ]]; then
+    /usr/libexec/PlistBuddy -c \
+      'Delete :TestConfigurations:0:TestTargets:0:EnvironmentVariables:EVOLV_HOSTED_ENROLLMENT_INVITE' \
+      "$XCTESTRUN" >/dev/null 2>&1 || true
+    /usr/libexec/PlistBuddy -c \
+      'Delete :TestConfigurations:0:TestTargets:0:EnvironmentVariables:EVOLV_HOSTED_CLOSED_INVITE' \
+      "$XCTESTRUN" >/dev/null 2>&1 || true
+  fi
+  local study
+  for study in "$VALID_STUDY" "$CLOSED_STUDY"; do
+    [[ -n "$study" ]] || continue
+    jq -n --arg study "$study" '{study_id:$study}' > "$TEST_DIR/cleanup-status-request.json"
+    curl --http1.1 --connect-timeout 5 --max-time 20 -sS -o "$TEST_DIR/cleanup-status.json" -X POST \
+      --config "$ADMIN_CURL_CONFIG" \
+      --data-binary "@$TEST_DIR/cleanup-status-request.json" "$ADMIN_URL/status" || true
+    if jq -e '.participants | type == "array"' "$TEST_DIR/cleanup-status.json" >/dev/null 2>&1; then
+      jq -r '.participants[]?.id' "$TEST_DIR/cleanup-status.json" | while IFS= read -r participant_id; do
+        jq -n --arg participant "$participant_id" '{participant_id:$participant}' \
+          > "$TEST_DIR/cleanup-participant.json"
+        curl --http1.1 --connect-timeout 5 --max-time 20 -sS -o /dev/null -X POST \
+          --config "$ADMIN_CURL_CONFIG" \
+          --data-binary "@$TEST_DIR/cleanup-participant.json" "$ADMIN_URL/participants/delete" || true
+      done
+    fi
+    jq -n --arg study "$study" '{study_id:$study}' > "$TEST_DIR/cleanup.json"
+    curl --http1.1 --connect-timeout 5 --max-time 20 -sS -o /dev/null -X POST \
+      --config "$ADMIN_CURL_CONFIG" \
+      --data-binary "@$TEST_DIR/cleanup.json" "$ADMIN_URL/studies/close" || true
+  done
+  [[ "$TEST_DIR" == /var/folders/* || "$TEST_DIR" == /tmp/* ]] && rm -rf -- "$TEST_DIR"
+}
+trap cleanup EXIT INT TERM
+
+jq -n '{name:"Build 19 hosted iOS enrollment E2E",duration_days:1,max_participants:2}' > "$TEST_DIR/create-valid.json"
+admin_request "studies/create" "$TEST_DIR/create-valid.json" "$TEST_DIR/valid-study.json"
+VALID_STUDY=$(jq -r '.id' "$TEST_DIR/valid-study.json")
+jq -n --arg study "$VALID_STUDY" '{study_id:$study,count:1}' > "$TEST_DIR/valid-invite-request.json"
+admin_request "invites/create" "$TEST_DIR/valid-invite-request.json" "$TEST_DIR/valid-invite.json"
+VALID_INVITE=$(jq -r '.invites[0]' "$TEST_DIR/valid-invite.json")
+
+jq -n '{name:"Build 19 closed-invite E2E",duration_days:1,max_participants:1}' > "$TEST_DIR/create-closed.json"
+admin_request "studies/create" "$TEST_DIR/create-closed.json" "$TEST_DIR/closed-study.json"
+CLOSED_STUDY=$(jq -r '.id' "$TEST_DIR/closed-study.json")
+jq -n --arg study "$CLOSED_STUDY" '{study_id:$study,count:1}' > "$TEST_DIR/closed-invite-request.json"
+admin_request "invites/create" "$TEST_DIR/closed-invite-request.json" "$TEST_DIR/closed-invite.json"
+CLOSED_INVITE=$(jq -r '.invites[0]' "$TEST_DIR/closed-invite.json")
+jq -n --arg study "$CLOSED_STUDY" '{study_id:$study}' > "$TEST_DIR/close.json"
+admin_request "studies/close" "$TEST_DIR/close.json" "$TEST_DIR/close-response.json"
+
+RUN_DIR="$REPO_ROOT/ios/build/hosted-enrollment-e2e/$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$RUN_DIR"
+xcodebuild \
+  -project "$REPO_ROOT/ios/Evolv.xcodeproj" \
+  -scheme Evolv \
+  -testPlan Evolv-Hosted-Enrollment \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+  -derivedDataPath "$RUN_DIR/DerivedData" \
+  build-for-testing > "$RUN_DIR/build-for-testing.log"
+
+XCTESTRUN=$(find "$RUN_DIR/DerivedData/Build/Products" -name '*.xctestrun' -type f -print -quit)
+[[ -n "$XCTESTRUN" && -f "$XCTESTRUN" ]] || fail "Xcode did not create the hosted test run configuration"
+{
+  print -r -- "Add :TestConfigurations:0:TestTargets:0:EnvironmentVariables:EVOLV_HOSTED_ENROLLMENT_INVITE string $VALID_INVITE"
+  print -r -- "Add :TestConfigurations:0:TestTargets:0:EnvironmentVariables:EVOLV_HOSTED_CLOSED_INVITE string $CLOSED_INVITE"
+  print -r -- "Save"
+  print -r -- "Exit"
+} | /usr/libexec/PlistBuddy "$XCTESTRUN" >/dev/null
+
+xcodebuild \
+  -xctestrun "$XCTESTRUN" \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+  -resultBundlePath "$RUN_DIR/HostedEnrollment.xcresult" \
+  -only-testing:EvolvTests/HostedPilotEnrollmentTests/testDisposableHostedEnrollmentThroughProductionClient \
+  test-without-building > "$RUN_DIR/xcodebuild.log"
+
+rg -q "HostedPilotEnrollmentTests.*skipped" "$RUN_DIR/xcodebuild.log" &&
+  fail "the hosted iOS enrollment test was skipped"
+rg -Fq "Test Case '-[EvolvTests.HostedPilotEnrollmentTests testDisposableHostedEnrollmentThroughProductionClient]' passed" \
+  "$RUN_DIR/xcodebuild.log" ||
+  fail "the hosted iOS enrollment test did not report a passing result"
+
+jq -n --arg study "$VALID_STUDY" '{study_id:$study}' > "$TEST_DIR/status-request.json"
+admin_request "status" "$TEST_DIR/status-request.json" "$TEST_DIR/status.json"
+jq -e '.participants == [] and .submissions == []' "$TEST_DIR/status.json" >/dev/null ||
+  fail "the disposable iOS client did not remove its test participant and submission"
+
+print "Hosted production-client enrollment, lost-response retry, one-use invite, persistence, submission authentication, and cleanup gates passed."

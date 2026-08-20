@@ -1,4 +1,6 @@
+import CryptoKit
 import Foundation
+import Security
 
 protocol PilotNetworkTransport {
     func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse)
@@ -30,7 +32,13 @@ struct PilotURLSessionTransport: PilotNetworkTransport {
 
 struct PilotAPIClient {
     private struct ErrorResponse: Decodable { var code: String?; var message: String? }
-    private struct EnrollmentRequest: Encodable { var inviteCode: String }
+    private struct InvitationRequest: Encodable { var inviteCode: String }
+    private struct EnrollmentRequest: Encodable {
+        var inviteCode: String
+        var enrollmentIdempotencyKey: UUID
+        var participantTokenVerifier: String
+        var recoveryCodeVerifier: String
+    }
     private struct InitializationRequest: Encodable {
         var clientSubmissionID: UUID
         var idempotencyKey: UUID
@@ -71,10 +79,53 @@ struct PilotAPIClient {
         self.networkAllowed = networkAllowed
     }
 
-    func enroll(inviteCode: String) async throws -> PilotEnrollmentResponse {
-        let normalized = inviteCode.uppercased().filter { $0.isLetter || $0.isNumber }
+    func validateInvitation(inviteCode: String) async throws -> PilotInvitationValidation {
+        let normalized = Self.normalizeInviteCode(inviteCode)
         guard normalized.count >= 16 else { throw PilotStudyError.invalidInvite }
-        return try await post(path: "enroll", body: EnrollmentRequest(inviteCode: normalized), token: nil)
+        return try await post(
+            path: "invites/validate",
+            body: InvitationRequest(inviteCode: normalized),
+            token: nil,
+            explicitSnakeCaseResponse: true
+        )
+    }
+
+    func enroll(attempt: PilotEnrollmentAttempt) async throws -> PilotEnrollmentResponse {
+        let normalized = Self.normalizeInviteCode(attempt.normalizedInviteCode)
+        guard normalized.count >= 16, normalized == attempt.normalizedInviteCode else {
+            throw PilotStudyError.invalidInvite
+        }
+        let metadata: PilotEnrollmentMetadataResponse = try await post(
+            path: "enroll",
+            body: EnrollmentRequest(
+                inviteCode: normalized,
+                enrollmentIdempotencyKey: attempt.idempotencyKey,
+                participantTokenVerifier: Self.sha256Hex(attempt.participantToken),
+                recoveryCodeVerifier: Self.sha256Hex(Self.normalizeInviteCode(attempt.deletionCode))
+            ),
+            token: nil,
+            explicitSnakeCaseResponse: true
+        )
+        return PilotEnrollmentResponse(
+            participantID: metadata.participantID,
+            studyID: metadata.studyID,
+            studyName: metadata.studyName,
+            pilotClosesAt: metadata.pilotClosesAt,
+            resultsDeleteAfter: metadata.resultsDeleteAfter,
+            participantToken: attempt.participantToken,
+            deletionCode: attempt.deletionCode
+        )
+    }
+
+    static func makeEnrollmentAttempt(inviteCode: String) throws -> PilotEnrollmentAttempt {
+        let normalized = normalizeInviteCode(inviteCode)
+        guard normalized.count >= 16 else { throw PilotStudyError.invalidInvite }
+        return PilotEnrollmentAttempt(
+            normalizedInviteCode: normalized,
+            idempotencyKey: UUID(),
+            participantToken: try secureToken(byteCount: 32),
+            deletionCode: try secureRecoveryCode(characterCount: 20)
+        )
     }
 
     func initialize(
@@ -100,7 +151,8 @@ struct PilotAPIClient {
                 wrappedKey: record.wrappedKey,
                 objects: objects
             ),
-            token: participantToken
+            token: participantToken,
+            explicitSnakeCaseResponse: true
         )
     }
 
@@ -128,7 +180,8 @@ struct PilotAPIClient {
         try await post(
             path: "submissions/complete",
             body: CompletionRequest(submissionID: submissionID, idempotencyKey: idempotencyKey),
-            token: participantToken
+            token: participantToken,
+            explicitSnakeCaseResponse: true
         )
     }
 
@@ -175,7 +228,8 @@ struct PilotAPIClient {
     private func post<Request: Encodable, Response: Decodable>(
         path: String,
         body: Request,
-        token: String?
+        token: String?,
+        explicitSnakeCaseResponse: Bool = false
     ) async throws -> Response {
         guard networkAllowed,
               let baseURL,
@@ -193,24 +247,93 @@ struct PilotAPIClient {
         let encoder = JSONEncoder.pilot
         encoder.keyEncodingStrategy = .convertToSnakeCase
         request.httpBody = try encoder.encode(body)
-        let (data, response) = try await transport.send(request)
+        let data: Data
+        let response: HTTPURLResponse
+        do {
+            (data, response) = try await transport.send(request)
+        } catch let error as PilotStudyError {
+            throw error
+        } catch let error as URLError {
+            switch error.code {
+            case .notConnectedToInternet, .networkConnectionLost, .cannotConnectToHost,
+                 .cannotFindHost, .dnsLookupFailed, .internationalRoamingOff:
+                throw path == "enroll" ? PilotStudyError.enrollmentRetryable : PilotStudyError.offline
+            case .timedOut:
+                throw path == "enroll" ? PilotStudyError.enrollmentRetryable : PilotStudyError.offline
+            default:
+                throw path == "enroll" ? PilotStudyError.enrollmentRetryable : PilotStudyError.unavailable
+            }
+        } catch {
+            throw path == "enroll" ? PilotStudyError.enrollmentRetryable : PilotStudyError.unavailable
+        }
         guard (200...299).contains(response.statusCode) else {
             let decoder = JSONDecoder.pilot
             decoder.keyDecodingStrategy = .convertFromSnakeCase
             let error = try? decoder.decode(ErrorResponse.self, from: data)
-            if path == "enroll" && (response.statusCode == 404 || response.statusCode == 409) {
-                if error?.code == "study_full" { throw PilotStudyError.pilotFull }
-                throw PilotStudyError.invalidInvite
+            if path == "enroll" || path == "invites/validate" {
+                switch error?.code {
+                case "invite_used": throw PilotStudyError.inviteAlreadyUsed
+                case "invite_expired": throw PilotStudyError.inviteExpired
+                case "study_closed": throw PilotStudyError.pilotClosed
+                case "study_full": throw PilotStudyError.pilotFull
+                case "rate_limited": throw PilotStudyError.rateLimited
+                case "invite_invalid", "invite_unavailable": throw PilotStudyError.invalidInvite
+                case "enrollment_idempotency_conflict":
+                    throw PilotStudyError.serverRejected("This saved enrollment attempt no longer matches the invitation. Contact the pilot organizer.")
+                default:
+                    if response.statusCode == 429 { throw PilotStudyError.rateLimited }
+                    if response.statusCode == 404 || response.statusCode == 409 {
+                        throw PilotStudyError.invalidInvite
+                    }
+                }
             }
             throw PilotStudyError.serverRejected(error?.message ?? "The study service rejected this request.")
         }
         let decoder = JSONDecoder.pilot
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        if !explicitSnakeCaseResponse {
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+        }
         do {
             return try decoder.decode(Response.self, from: data)
         } catch {
-            throw PilotStudyError.unavailable
+            throw path == "enroll" ? PilotStudyError.responseInvalid : PilotStudyError.unavailable
         }
+    }
+
+    static func normalizeInviteCode(_ value: String) -> String {
+        value.uppercased().filter { $0.isLetter || $0.isNumber }
+    }
+
+    private static func sha256Hex(_ value: String) -> String {
+        SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func secureToken(byteCount: Int) throws -> String {
+        var bytes = [UInt8](repeating: 0, count: byteCount)
+        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+            throw PilotStudyError.storageFailed
+        }
+        return Data(bytes).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    private static func secureRecoveryCode(characterCount: Int) throws -> String {
+        let alphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+        var characters: [Character] = []
+        while characters.count < characterCount {
+            var byte: UInt8 = 0
+            guard SecRandomCopyBytes(kSecRandomDefault, 1, &byte) == errSecSuccess else {
+                throw PilotStudyError.storageFailed
+            }
+            // 224 is the largest multiple of the 32-character alphabet below 256.
+            guard byte < 224 else { continue }
+            characters.append(alphabet[Int(byte) % alphabet.count])
+        }
+        return stride(from: 0, to: characters.count, by: 5)
+            .map { String(characters[$0..<min($0 + 5, characters.count)]) }
+            .joined(separator: "-")
     }
 
     private static var configuredBaseURL: URL? {

@@ -130,7 +130,6 @@ final class PilotSharingTests: XCTestCase {
     func testUploadAuthorizationDecodesMissingAndAlreadyUploadedStates() throws {
         let objectID = UUID()
         let decoder = JSONDecoder.pilot
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
         let upload = try decoder.decode(
             PilotUploadAuthorization.self,
             from: Data(#"{"object_id":"\#(objectID.uuidString)","signed_url":"https://storage.example.test/upload","already_uploaded":false}"#.utf8)
@@ -149,7 +148,6 @@ final class PilotSharingTests: XCTestCase {
     func testUploadAuthorizationRejectsAmbiguousServerState() {
         let objectID = UUID()
         let decoder = JSONDecoder.pilot
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
         XCTAssertThrowsError(try decoder.decode(
             PilotUploadAuthorization.self,
             from: Data(#"{"object_id":"\#(objectID.uuidString)","already_uploaded":false}"#.utf8)
@@ -221,7 +219,13 @@ final class PilotSharingTests: XCTestCase {
         )
 
         do {
-            _ = try await client.enroll(inviteCode: "ABCDE12345ABCDE12345")
+            let attempt = PilotEnrollmentAttempt(
+                normalizedInviteCode: "ABCDE12345ABCDE12345",
+                idempotencyKey: UUID(),
+                participantToken: "participant-token-that-is-long-enough-for-testing",
+                deletionCode: "ABCDE-FGHJK-LMNPQ-RSTUV"
+            )
+            _ = try await client.enroll(attempt: attempt)
             XCTFail("A full cohort should reject enrollment")
         } catch {
             XCTAssertEqual(error as? PilotStudyError, .pilotFull)

@@ -119,6 +119,11 @@ run_device() {
   print "Phase 5 physical-device gates passed."
 }
 
+run_hosted_enrollment() {
+  "$SCRIPT_DIR/evolv-hosted-enrollment-e2e"
+  print "Hosted iOS enrollment E2E gate passed."
+}
+
 run_human() {
   require_file "participant manifest" "$PARTICIPANTS"
   require_file "locked split" "$SPLIT_LOCK"
@@ -158,6 +163,7 @@ case "$MODE" in
   pilot)
     run_automated
     run_device
+    run_hosted_enrollment
     write_status true true false true false
     ;;
   human)
@@ -170,6 +176,7 @@ case "$MODE" in
     [[ -n "$DEVICE_ID" ]] || fail "a physical iPhone UDID is required with --device"
     run_automated
     run_device
+    run_hosted_enrollment
     run_human
     write_status true true true true true
     ;;

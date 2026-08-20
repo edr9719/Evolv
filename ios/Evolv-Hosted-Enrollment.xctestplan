@@ -1,0 +1,31 @@
+{
+  "configurations" : [
+    {
+      "id" : "9A2869CD-7A0E-4AA8-AE80-56E110000019",
+      "name" : "Hosted enrollment",
+      "options" : {
+        "environmentVariableEntries" : [
+          {"key":"EVOLV_ALLOW_NETWORK","value":"1","isEnabled":true}
+        ]
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "codeCoverage" : false,
+    "targetForVariableExpansion" : {
+      "containerPath" : "container:Evolv.xcodeproj",
+      "identifier" : "874C11CF293C65A9E23D8D12",
+      "name" : "Evolv"
+    }
+  },
+  "testTargets" : [
+    {
+      "target" : {
+        "containerPath" : "container:Evolv.xcodeproj",
+        "identifier" : "F960154B0939BA5BC245A8E1",
+        "name" : "EvolvTests"
+      }
+    }
+  ],
+  "version" : 1
+}

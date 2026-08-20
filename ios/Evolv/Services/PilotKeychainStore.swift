@@ -5,6 +5,9 @@ protocol PilotSecretStoring {
     func participantToken() throws -> String?
     func deletionCode() throws -> String?
     func save(participantToken: String, deletionCode: String) throws
+    func enrollmentAttempt() throws -> PilotEnrollmentAttempt?
+    func saveEnrollmentAttempt(_ attempt: PilotEnrollmentAttempt) throws
+    func deleteEnrollmentAttempt() throws
     func deleteParticipantToken() throws
     func deleteAll() throws
 }
@@ -24,6 +27,7 @@ struct PilotKeychainStore: PilotSecretStoring {
     private enum Account {
         static let participantToken = "pilot-participant-token"
         static let deletionCode = "pilot-deletion-code"
+        static let enrollmentAttempt = "pilot-enrollment-attempt-v2"
     }
 
     private let service = "com.app.evolv.pilot"
@@ -46,6 +50,34 @@ struct PilotKeychainStore: PilotSecretStoring {
         }
     }
 
+    func enrollmentAttempt() throws -> PilotEnrollmentAttempt? {
+        guard let value = try read(account: Account.enrollmentAttempt),
+              let data = value.data(using: .utf8) else { return nil }
+        do {
+            return try JSONDecoder.pilot.decode(PilotEnrollmentAttempt.self, from: data)
+        } catch {
+            throw PilotStudyError.storageFailed
+        }
+    }
+
+    func saveEnrollmentAttempt(_ attempt: PilotEnrollmentAttempt) throws {
+        do {
+            let data = try JSONEncoder.pilot.encode(attempt)
+            guard let value = String(data: data, encoding: .utf8) else {
+                throw PilotStudyError.storageFailed
+            }
+            try upsert(value, account: Account.enrollmentAttempt)
+        } catch let error as PilotStudyError {
+            throw error
+        } catch {
+            throw PilotStudyError.storageFailed
+        }
+    }
+
+    func deleteEnrollmentAttempt() throws {
+        try delete(account: Account.enrollmentAttempt)
+    }
+
     func deleteParticipantToken() throws {
         try delete(account: Account.participantToken)
     }
@@ -53,6 +85,7 @@ struct PilotKeychainStore: PilotSecretStoring {
     func deleteAll() throws {
         try delete(account: Account.participantToken)
         try delete(account: Account.deletionCode)
+        try delete(account: Account.enrollmentAttempt)
     }
 
     private func read(account: String) throws -> String? {
