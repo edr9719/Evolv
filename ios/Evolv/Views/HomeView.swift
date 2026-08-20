@@ -75,6 +75,8 @@ struct HomeView: View {
                                 .font(.system(size: 17, weight: .regular))
                         }
                         .tint(EvolvTheme.textMuted)
+                        .accessibilityLabel("Settings")
+                        .accessibilityIdentifier("home.settings")
                     }
                 }
                 .sheet(isPresented: $showPaywall) { PaywallView() }

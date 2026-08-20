@@ -18,16 +18,20 @@ enum ValidationProgramAvailability {
 
 enum ValidationStudyError: LocalizedError {
     case activeSessionExists
+    case pilotEnrollmentRequired
     case eligibleAnchorUnavailable
     case sessionUnavailable
     case sessionIneligible(ValidationDeviationReason)
     case invalidCameraConfiguration
+    case baselineEvidenceRequired
     case conditionsRequired
 
     var errorDescription: String? {
         switch self {
         case .activeSessionExists:
             return "Finish or leave the current consistency test before starting another one."
+        case .pilotEnrollmentRequired:
+            return "Join the invited pilot before starting the official five-set test."
         case .eligibleAnchorUnavailable:
             return "That recent scan can no longer be used as Set 1. Start with a new Set 1 instead."
         case .sessionUnavailable:
@@ -36,6 +40,8 @@ enum ValidationStudyError: LocalizedError {
             return "This test can no longer continue because \(reason.label.lowercased()). Your completed sets and draft photos remain saved on this iPhone."
         case .invalidCameraConfiguration:
             return "This set did not use the camera and lens locked for the test. The saved draft remains available."
+        case .baselineEvidenceRequired:
+            return "Set 1 must pass Evolv's comparison-evidence check before the test can continue. Retake the requested pose and try again."
         case .conditionsRequired:
             return "Answer the conditions question for the saved set before continuing."
         }
@@ -84,9 +90,9 @@ enum ValidationConsistencyStatus: String, Codable, Hashable {
         case .consistent:
             return "Evolv found no unexpected visual change across the four same-session comparisons."
         case .limitedEvidence:
-            return "No change was detected, but some required comparison evidence was unavailable."
+            return "Some photos could not be analyzed reliably. Evolv left those comparisons unavailable instead of guessing."
         case .needsReview:
-            return "At least one comparison changed unexpectedly, conflicted, failed processing, or had a recorded condition change."
+            return "A supported comparison changed unexpectedly, conflicted, used different conditions, or Evolv encountered a true processing problem."
         }
     }
 }
@@ -132,12 +138,127 @@ struct ValidationSetConditions: Codable, Hashable {
     var recordedAt: Date
 }
 
+enum ValidationDiagnosticKind: String, Codable, Hashable {
+    /// The detector conservatively abstained. This is missing evidence, not an
+    /// application malfunction and never becomes a passing result.
+    case evidenceUnavailable
+    /// Image loading, persistence, or an unexpected pipeline exception failed.
+    case systemError
+    /// The evidence exists but the controlled-capture contract changed.
+    case comparabilityChange
+}
+
+enum ValidationEvidenceStage: String, Codable, Hashable {
+    case photoLoading
+    case poseExtraction
+    case hipLandmarks
+    case segmentation
+    case silhouette
+    case regionFeatures
+    case comparability
+}
+
+/// Privacy-safe, durable diagnostics for one pose at one set. No coordinates,
+/// masks, confidence values, filenames, or body descriptions are stored.
+struct ValidationPoseDiagnostic: Codable, Hashable, Identifiable {
+    var setNumber: Int
+    var pose: Pose
+    var stage: ValidationEvidenceStage
+    var kind: ValidationDiagnosticKind
+    var code: String
+    var affectedRegions: [BodyRegion]
+
+    var id: String {
+        "set_\(setNumber).\(pose.rawValue).\(stage.rawValue).\(code).\(affectedRegions.map(\.rawValue).joined(separator: "-"))"
+    }
+
+    var userTitle: String {
+        switch code {
+        case "hip_landmarks_unavailable":
+            return "\(pose.shortLabel) hips weren't detected"
+        case "shoulder_landmarks_unavailable":
+            return "\(pose.shortLabel) shoulders weren't detected"
+        case "body_pose_unavailable":
+            return "\(pose.shortLabel) pose couldn't be analyzed"
+        case "person_segmentation_unavailable":
+            return "\(pose.shortLabel) outline couldn't be separated"
+        case "torso_scale_unavailable", "silhouette_evidence_unavailable":
+            return "\(pose.shortLabel) torso couldn't be analyzed"
+        case "required_region_feature_unavailable":
+            if affectedRegions == [.arms] {
+                return "\(pose.shortLabel) arms weren't clear enough"
+            }
+            return "\(pose.shortLabel) comparison evidence was incomplete"
+        case "photo_load_failed", "image_decode_failed":
+            return "\(pose.shortLabel) photo couldn't be opened"
+        default:
+            return kind == .systemError
+                ? "\(pose.shortLabel) processing didn't finish"
+                : "\(pose.shortLabel) needs another photo"
+        }
+    }
+
+    var userGuidance: String {
+        switch code {
+        case "hip_landmarks_unavailable":
+            return "Step back slightly and keep both hip creases and your upper legs clearly inside the frame."
+        case "shoulder_landmarks_unavailable":
+            return "Keep your complete shoulders inside the frame and stand away from the wall."
+        case "body_pose_unavailable":
+            return "Show your head through mid-thigh, keep the pose clear, and make sure no body part touches the frame edge."
+        case "person_segmentation_unavailable":
+            return "Use even front lighting and stand away from the wall so your outline is distinct."
+        case "torso_scale_unavailable", "silhouette_evidence_unavailable":
+            return "Step back slightly, show your head through mid-thigh, and keep your hips unobstructed."
+        case "required_region_feature_unavailable":
+            if affectedRegions == [.arms] {
+                return "Let your arms hang naturally with visible space between each arm and your torso."
+            }
+            return "Match the guide, keep your hips and upper legs visible, and avoid connected shadows."
+        case "photo_load_failed", "image_decode_failed":
+            return "Retake this pose so Evolv can save and inspect a fresh photo."
+        default:
+            return kind == .systemError
+                ? "Try the check again. If it repeats, close and reopen Evolv before retaking."
+                : "Retake this pose using the on-screen guide."
+        }
+    }
+}
+
+struct ValidationPoseEvidence: Codable, Hashable, Identifiable {
+    var pose: Pose
+    var poseExtracted: Bool
+    var silhouetteGenerated: Bool
+    var supportedRegions: [BodyRegion]
+
+    var id: Pose { pose }
+}
+
+struct ValidationBaselinePreflight: Codable, Hashable {
+    var checkedAt: Date
+    var captureIDs: [UUID]
+    var poseEvidence: [ValidationPoseEvidence]
+    var diagnostics: [ValidationPoseDiagnostic]
+
+    var isViable: Bool { diagnostics.isEmpty }
+    var posesNeedingRetake: [Pose] {
+        Pose.required.filter { pose in diagnostics.contains { $0.pose == pose } }
+    }
+
+    func matches(_ captures: [PoseCapture]) -> Bool {
+        Set(captureIDs) == Set(captures.map(\.id))
+    }
+}
+
 struct ValidationSetComparison: Codable, Hashable {
     var setNumber: Int
     var regionalComparisons: [RegionalComparison]
     var failures: [String: String]
     var hasSufficientCoreEvidence: Bool
     var processingDurationMilliseconds: Int? = nil
+    /// Optional so Build 17 records remain decodable. New evaluations always
+    /// write stage-specific diagnostics with baseline/repeat provenance.
+    var diagnostics: [ValidationPoseDiagnostic]? = nil
 }
 
 struct ValidationSetRecord: Identifiable, Codable, Hashable {
@@ -183,10 +304,18 @@ struct ValidationStudySession: Identifiable, Codable, Hashable {
     var statusReasons: [ValidationDeviationReason]
     var completedAt: Date?
     var algorithmMetadata: AnalysisAlgorithmMetadata? = nil
+    /// Missing on Build 17 sessions. Those records are preserved verbatim;
+    /// every newly created Build 18 session requires a viable Set 1.
+    var baselinePreflightRequired: Bool? = nil
+    var baselinePreflight: ValidationBaselinePreflight? = nil
 
     var completedSetCount: Int { sets.count }
     var nextSetNumber: Int { min(Self.requiredSetCount, sets.count + 1) }
     var isComplete: Bool { sets.count == Self.requiredSetCount }
+    var requiresBaselinePreflight: Bool { baselinePreflightRequired == true }
+    var hasViableBaseline: Bool {
+        !requiresBaselinePreflight || baselinePreflight?.isViable == true
+    }
     var anchorScanID: UUID? { sets.first(where: { $0.setNumber == 1 })?.scanID }
     var awaitingConditionsSetNumber: Int? {
         sets.sorted(by: { $0.setNumber < $1.setNumber })
@@ -224,6 +353,22 @@ enum ValidationSessionEligibility: Equatable {
 }
 
 enum ValidationStudyPolicy {
+    static func canStartOfficialPilot(
+        enrollment: PilotLocalEnrollment?
+    ) -> Bool {
+        enrollment?.status == .active
+    }
+
+    static func hasRequiredBaselineEvidence(
+        session: ValidationStudySession,
+        committingSetNumber setNumber: Int,
+        captures: [PoseCapture]
+    ) -> Bool {
+        guard session.requiresBaselinePreflight else { return true }
+        guard let preflight = session.baselinePreflight, preflight.isViable else { return false }
+        return setNumber != 1 || preflight.matches(captures)
+    }
+
     static func isValidDraft(
         _ captures: [PoseCapture],
         position: CaptureCameraPosition,

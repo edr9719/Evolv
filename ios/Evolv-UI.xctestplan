@@ -1,0 +1,31 @@
+{
+  "configurations" : [
+    {
+      "id" : "A18C3C11-4058-4B4B-A737-A90EC5C8DA18",
+      "name" : "Pilot flow UI",
+      "options" : {
+        "environmentVariableEntries" : [
+          {"key":"EVOLV_ALLOW_NETWORK","value":"0","isEnabled":true}
+        ]
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "codeCoverage" : false,
+    "targetForVariableExpansion" : {
+      "containerPath" : "container:Evolv.xcodeproj",
+      "identifier" : "874C11CF293C65A9E23D8D12",
+      "name" : "Evolv"
+    }
+  },
+  "testTargets" : [
+    {
+      "target" : {
+        "containerPath" : "container:Evolv.xcodeproj",
+        "identifier" : "48395BE3522DF5A9E4D50831",
+        "name" : "EvolvUITests"
+      }
+    }
+  ],
+  "version" : 1
+}

@@ -4,7 +4,7 @@ struct ValidationStudyView: View {
     @Environment(AppState.self) private var app
 
     @State private var selectedCamera = CameraPreferenceStore.load()
-    @State private var useEligibleScan = true
+    @State private var useEligibleScan = false
     @State private var showNewSessionSetup = false
     @State private var captureContext: ValidationCaptureContext?
     @State private var reportingChange = false
@@ -33,9 +33,6 @@ struct ValidationStudyView: View {
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             app.refreshValidationSessionEligibility()
-            if let metadata = eligibleAnchor.flatMap({ ValidationStudyPolicy.cameraConfiguration(for: $0.captures) }) {
-                selectedCamera = metadata.position
-            }
         }
         .fullScreenCover(item: $captureContext) { context in
             CaptureFlowView(
@@ -61,7 +58,14 @@ struct ValidationStudyView: View {
 
     @ViewBuilder
     private var content: some View {
-        if showNewSessionSetup || latestSession == nil {
+        if let session = latestSession,
+           session.status == .completed,
+           !hasActivePilot,
+           !showNewSessionSetup {
+            completedView(session)
+        } else if !hasActivePilot {
+            pilotEnrollmentRequiredView
+        } else if showNewSessionSetup || latestSession == nil {
             setupView
         } else if let session = latestSession {
             switch session.status {
@@ -74,6 +78,48 @@ struct ValidationStudyView: View {
             case .protocolIneligible, .abandoned:
                 ineligibleView(session)
             }
+        }
+    }
+
+    private var hasActivePilot: Bool {
+        pilot.enrollment?.status == .active
+    }
+
+    private var pilotEnrollmentRequiredView: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("INVITED PILOT")
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .tracking(1.5)
+                    .foregroundStyle(EvolvTheme.accent)
+                Text("Join before starting the official test")
+                    .font(.system(size: 25, weight: .semibold, design: .rounded))
+                    .foregroundStyle(EvolvTheme.text)
+                    .accessibilityIdentifier("validation.pilot.enrollment-required")
+                Text("The five-set protocol takes about 20–30 minutes. First review what the pilot checks, give consent, enter your invitation code, and choose what you may want to share.")
+                    .font(.system(size: 13.5, design: .rounded))
+                    .foregroundStyle(EvolvTheme.textMuted)
+                    .lineSpacing(3)
+            }
+
+            GlassCard(padding: 18, cornerRadius: 20) {
+                VStack(alignment: .leading, spacing: 11) {
+                    instruction("Nothing uploads automatically.")
+                    instruction("After Set 5, you review results and approve any photos one by one.")
+                    instruction("Your normal timeline remains stored on this iPhone.")
+                }
+            }
+
+            EvolvPrimaryButton(title: "Review pilot & join", icon: "checkmark.shield") {
+                showPilotEnrollment = true
+            }
+            .accessibilityIdentifier("validation.pilot.join-required")
+
+            Text("This screen is the invited pilot. It is not a local-only diagnostic test.")
+                .font(.system(size: 11.5, design: .rounded))
+                .foregroundStyle(EvolvTheme.textFaint)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
         }
     }
 
@@ -96,8 +142,6 @@ struct ValidationStudyView: View {
 
             instructionCard
 
-            pilotEnrollmentCard
-
             SettingsGroup(
                 header: "Camera",
                 footer: "The selected camera is locked for all five sets because front and rear lenses can produce different geometry."
@@ -106,26 +150,43 @@ struct ValidationStudyView: View {
                     .padding(14)
             }
 
-            if let anchor = eligibleAnchor {
-                eligibleAnchorCard(anchor)
-            } else {
-                timelineRuleCard
-            }
+            freshSetOneCard
 
             VStack(spacing: 10) {
-                EvolvPrimaryButton(title: "Start consistency test", icon: "camera.fill") {
+                EvolvPrimaryButton(title: "Start invited consistency test", icon: "camera.fill") {
                     startSession()
                 }
+                .accessibilityIdentifier("validation.official.start")
                 Label(
-                    pilot.enrollment?.status == .active
-                        ? "Nothing is shared until you review the completed test."
-                        : "Without pilot enrollment, everything stays on this iPhone.",
+                    "Nothing is shared until you review the completed test.",
                     systemImage: "lock.shield"
                 )
                     .font(.system(size: 11.5, design: .rounded))
                     .foregroundStyle(EvolvTheme.textFaint)
                     .multilineTextAlignment(.center)
             }
+        }
+    }
+
+    private var freshSetOneCard: some View {
+        HStack(alignment: .top, spacing: 11) {
+            Image(systemName: "viewfinder.circle")
+                .foregroundStyle(EvolvTheme.accent)
+            VStack(alignment: .leading, spacing: 5) {
+                Text("A fresh Set 1 is required")
+                    .font(.system(size: 13.5, weight: .semibold, design: .rounded))
+                    .foregroundStyle(EvolvTheme.text)
+                Text("Before Set 2, Evolv will run its full on-device comparison-evidence check. If one pose is unusable, you retake only that pose.")
+                    .font(.system(size: 12.5, design: .rounded))
+                    .foregroundStyle(EvolvTheme.textMuted)
+                    .lineSpacing(2)
+            }
+        }
+        .padding(16)
+        .background {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(EvolvTheme.surface)
+                .overlay(RoundedRectangle(cornerRadius: 18).stroke(EvolvTheme.stroke, lineWidth: 1))
         }
     }
 
@@ -503,7 +564,6 @@ struct ValidationStudyView: View {
 
             EvolvPrimaryButton(title: "Run another test", icon: "arrow.clockwise") {
                 showNewSessionSetup = true
-                useEligibleScan = false
                 selectedCamera = CameraPreferenceStore.load()
             }
         }
@@ -514,16 +574,58 @@ struct ValidationStudyView: View {
         let stable = comparisons.flatMap(\.regionalComparisons).filter { $0.status == .stable }.count
         let unavailable = comparisons.flatMap(\.regionalComparisons).filter { $0.status == .unavailable }.count
         let changed = comparisons.flatMap(\.regionalComparisons).filter { $0.status == .increase || $0.status == .decrease }.count
-        return GlassCard(padding: 18, cornerRadius: 20) {
-            HStack {
-                resultMetric("\(stable)", label: "STABLE")
-                Divider().overlay(EvolvTheme.stroke)
-                resultMetric("\(unavailable)", label: "UNAVAILABLE")
-                Divider().overlay(EvolvTheme.stroke)
-                resultMetric("\(changed)", label: "CHANGED")
+        let diagnostics = actionableDiagnostics(from: comparisons)
+        return VStack(spacing: 12) {
+            GlassCard(padding: 18, cornerRadius: 20) {
+                HStack {
+                    resultMetric("\(stable)", label: "STABLE")
+                    Divider().overlay(EvolvTheme.stroke)
+                    resultMetric("\(unavailable)", label: "UNAVAILABLE")
+                    Divider().overlay(EvolvTheme.stroke)
+                    resultMetric("\(changed)", label: "CHANGED")
+                }
+                .frame(height: 54)
             }
-            .frame(height: 54)
+
+            if !diagnostics.isEmpty {
+                GlassCard(padding: 18, cornerRadius: 20) {
+                    VStack(alignment: .leading, spacing: 13) {
+                        Text("WHAT NEEDS ATTENTION")
+                            .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                            .tracking(1.3)
+                            .foregroundStyle(EvolvTheme.textFaint)
+                        ForEach(diagnostics) { diagnostic in
+                            HStack(alignment: .top, spacing: 11) {
+                                Image(systemName: diagnostic.kind == .systemError ? "exclamationmark.triangle" : "viewfinder.circle")
+                                    .foregroundStyle(diagnostic.kind == .systemError ? EvolvTheme.stable : EvolvTheme.accent)
+                                    .frame(width: 20)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(diagnostic.userTitle)
+                                        .font(.system(size: 13.5, weight: .semibold, design: .rounded))
+                                        .foregroundStyle(EvolvTheme.text)
+                                    Text(diagnostic.userGuidance)
+                                        .font(.system(size: 11.5, design: .rounded))
+                                        .foregroundStyle(EvolvTheme.textMuted)
+                                        .lineSpacing(2)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    private func actionableDiagnostics(
+        from comparisons: [ValidationSetComparison]
+    ) -> [ValidationPoseDiagnostic] {
+        var seen: Set<String> = []
+        return comparisons
+            .flatMap { $0.diagnostics ?? [] }
+            .filter { diagnostic in
+                let key = "\(diagnostic.pose.rawValue).\(diagnostic.code).\(diagnostic.affectedRegions.map(\.rawValue).joined(separator: "-"))"
+                return seen.insert(key).inserted
+            }
     }
 
     private func resultMetric(_ value: String, label: String) -> some View {
@@ -559,7 +661,6 @@ struct ValidationStudyView: View {
                 .foregroundStyle(EvolvTheme.textFaint)
             EvolvPrimaryButton(title: "Start a new test", icon: "arrow.clockwise") {
                 showNewSessionSetup = true
-                useEligibleScan = false
             }
         }
     }
@@ -575,17 +676,13 @@ struct ValidationStudyView: View {
 
     private func startSession() {
         do {
-            let useAnchor = useEligibleScan && eligibleAnchor != nil
-            let id = try app.startValidationSession(
-                cameraPosition: selectedCamera,
-                useEligibleCanonical: useAnchor
+            let id = try app.startOfficialValidationSession(
+                cameraPosition: selectedCamera
             )
             showNewSessionSetup = false
             reportingChange = false
             selectedDeviations = []
-            if !useAnchor {
-                captureContext = app.validationCaptureContext(sessionID: id)
-            }
+            captureContext = app.validationCaptureContext(sessionID: id)
         } catch {
             present(error)
         }

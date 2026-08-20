@@ -35,10 +35,12 @@ targets:
     scheme:
       testTargets:
         - EvolvTests
+        - EvolvUITests
       testPlans:
         - path: Evolv-Unit.xctestplan
           defaultPlan: true
         - path: Evolv-Vision-Device.xctestplan
+        - path: Evolv-UI.xctestplan
       environmentVariables:
         'SUPABASE_ANON_KEY': 'sb_publishable_ZA6Ra_Sfi20g26DKGNeWXw_V0Qco0UW'
         'SUPABASE_PUBLISHABLE_KEY': 'sb_publishable_ZA6Ra_Sfi20g26DKGNeWXw_V0Qco0UW'
@@ -65,3 +67,19 @@ targets:
         DEVELOPMENT_TEAM: 359J9B4674
         CODE_SIGN_STYLE: Automatic
         SWIFT_VERSION: "5.0"
+  EvolvUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: EvolvUITests
+    dependencies:
+      - target: Evolv
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.app.evolv.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        DEVELOPMENT_TEAM: 359J9B4674
+        CODE_SIGN_STYLE: Automatic
+        SWIFT_VERSION: "5.0"
+        TEST_TARGET_NAME: Evolv

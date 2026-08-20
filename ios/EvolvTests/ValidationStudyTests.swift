@@ -146,6 +146,105 @@ final class ValidationStudyTests: XCTestCase {
         XCTAssertEqual(preview.photoCount, 15)
     }
 
+    func testOfficialPilotRequiresActiveEnrollment() {
+        XCTAssertFalse(ValidationStudyPolicy.canStartOfficialPilot(enrollment: nil))
+
+        var enrollment = pilotEnrollment(status: .active)
+        XCTAssertTrue(ValidationStudyPolicy.canStartOfficialPilot(enrollment: enrollment))
+
+        enrollment.status = .withdrawn
+        XCTAssertFalse(ValidationStudyPolicy.canStartOfficialPilot(enrollment: enrollment))
+    }
+
+    func testFounderFailurePatternBlocksSetTwoAndTargetsSideAndBack() {
+        let captures = requiredCaptures(position: .front, lens: "wide")
+        let preflight = ValidationBaselinePreflight(
+            checkedAt: referenceDate,
+            captureIDs: captures.map(\.id),
+            poseEvidence: [
+                ValidationPoseEvidence(
+                    pose: .front,
+                    poseExtracted: true,
+                    silhouetteGenerated: true,
+                    supportedRegions: [.shoulders, .chest, .waist, .arms]
+                ),
+                ValidationPoseEvidence(pose: .side, poseExtracted: false, silhouetteGenerated: false, supportedRegions: []),
+                ValidationPoseEvidence(pose: .back, poseExtracted: true, silhouetteGenerated: false, supportedRegions: [])
+            ],
+            diagnostics: [
+                diagnostic(set: 1, pose: .side, stage: .hipLandmarks, code: "hip_landmarks_unavailable"),
+                diagnostic(set: 1, pose: .back, stage: .hipLandmarks, code: "hip_landmarks_unavailable")
+            ]
+        )
+        var session = studySession(setCount: 0)
+        session.baselinePreflightRequired = true
+        session.baselinePreflight = preflight
+
+        XCTAssertFalse(preflight.isViable)
+        XCTAssertEqual(preflight.posesNeedingRetake, [.side, .back])
+        XCTAssertFalse(ValidationStudyPolicy.hasRequiredBaselineEvidence(
+            session: session,
+            committingSetNumber: 1,
+            captures: captures
+        ))
+        XCTAssertFalse(ValidationStudyPolicy.hasRequiredBaselineEvidence(
+            session: session,
+            committingSetNumber: 2,
+            captures: captures
+        ))
+    }
+
+    func testViableSetOneCanProceedButReplacingPhotoRequiresNewPreflight() {
+        let captures = requiredCaptures(position: .front, lens: "wide")
+        let viable = ValidationBaselinePreflight(
+            checkedAt: referenceDate,
+            captureIDs: captures.map(\.id),
+            poseEvidence: Pose.required.map {
+                ValidationPoseEvidence(
+                    pose: $0,
+                    poseExtracted: true,
+                    silhouetteGenerated: true,
+                    supportedRegions: [.shoulders, .chest, .waist, .arms]
+                )
+            },
+            diagnostics: []
+        )
+        var session = studySession(setCount: 0)
+        session.baselinePreflightRequired = true
+        session.baselinePreflight = viable
+
+        XCTAssertTrue(ValidationStudyPolicy.hasRequiredBaselineEvidence(
+            session: session,
+            committingSetNumber: 1,
+            captures: captures
+        ))
+        XCTAssertTrue(ValidationStudyPolicy.hasRequiredBaselineEvidence(
+            session: session,
+            committingSetNumber: 2,
+            captures: captures
+        ))
+
+        var replaced = captures
+        replaced[1] = capture(.side, position: .front, lens: "wide")
+        XCTAssertFalse(ValidationStudyPolicy.hasRequiredBaselineEvidence(
+            session: session,
+            committingSetNumber: 1,
+            captures: replaced
+        ))
+    }
+
+    func testBaselineFeatureRequirementsReuseComparisonContract() {
+        var profiles = requiredProfiles(match: nil)
+        let frontIndex = profiles.firstIndex { $0.pose == .front }!
+        profiles[frontIndex].regionFeatures?.removeAll { $0.region == .chest }
+
+        let deficits = VisualSignalEngine.baselineEvidenceDeficits(profiles: profiles)
+
+        XCTAssertEqual(deficits[.front], Set([.chest]))
+        XCTAssertNil(deficits[.side])
+        XCTAssertNil(deficits[.back])
+    }
+
     func testIdenticalSupportedFeaturesClassifyAsConsistent() {
         let baseline = requiredProfiles(match: nil)
         let current = requiredProfiles(match: 1)
@@ -200,6 +299,67 @@ final class ValidationStudyTests: XCTestCase {
             .limitedEvidence
         )
         XCTAssertNil(unavailable.normalizedDelta)
+    }
+
+    func testExpectedDetectorAbstentionIsLimitedRatherThanNeedsReview() {
+        let unavailable = RegionalComparison(
+            region: .waist,
+            status: .unavailable,
+            normalizedDelta: nil,
+            contributions: [],
+            reason: "required_pose_evidence_unavailable"
+        )
+        let issue = diagnostic(
+            set: 1,
+            pose: .side,
+            stage: .hipLandmarks,
+            code: "hip_landmarks_unavailable"
+        )
+        let results = Dictionary(uniqueKeysWithValues: (2...5).map { number in
+            (number, ValidationSetComparison(
+                setNumber: number,
+                regionalComparisons: [unavailable],
+                failures: ["set_1.side.hipLandmarks": "hip_landmarks_unavailable"],
+                hasSufficientCoreEvidence: false,
+                diagnostics: [issue]
+            ))
+        })
+
+        XCTAssertEqual(
+            ValidationConsistencyEngine.classify(
+                session: completedStudySession(),
+                comparisonsBySet: results
+            ),
+            .limitedEvidence
+        )
+    }
+
+    func testTrueProcessingErrorStillNeedsReview() {
+        let issue = ValidationPoseDiagnostic(
+            setNumber: 2,
+            pose: .front,
+            stage: .photoLoading,
+            kind: .systemError,
+            code: "photo_load_failed",
+            affectedRegions: []
+        )
+        let results = Dictionary(uniqueKeysWithValues: (2...5).map { number in
+            (number, ValidationSetComparison(
+                setNumber: number,
+                regionalComparisons: [],
+                failures: ["set_2.front.photoLoading": "photo_load_failed"],
+                hasSufficientCoreEvidence: false,
+                diagnostics: number == 2 ? [issue] : []
+            ))
+        })
+
+        XCTAssertEqual(
+            ValidationConsistencyEngine.classify(
+                session: completedStudySession(),
+                comparisonsBySet: results
+            ),
+            .needsReview
+        )
     }
 
     func testUnexpectedChangeFailureOrRecordedDeviationNeedsReview() {
@@ -278,7 +438,7 @@ final class ValidationStudyTests: XCTestCase {
     }
 
     private func studySession(setCount: Int) -> ValidationStudySession {
-        let records = (1...setCount).map { number in
+        let records: [ValidationSetRecord] = setCount == 0 ? [] : (1...setCount).map { number in
             ValidationSetRecord(
                 setNumber: number,
                 scanID: UUID(),
@@ -362,6 +522,40 @@ final class ValidationStudyTests: XCTestCase {
             outputMirrored: false,
             sourceOrientation: .up,
             normalizedOrientation: .up
+        )
+    }
+
+    private func diagnostic(
+        set: Int,
+        pose: Pose,
+        stage: ValidationEvidenceStage,
+        code: String
+    ) -> ValidationPoseDiagnostic {
+        ValidationPoseDiagnostic(
+            setNumber: set,
+            pose: pose,
+            stage: stage,
+            kind: .evidenceUnavailable,
+            code: code,
+            affectedRegions: []
+        )
+    }
+
+    private func pilotEnrollment(status: PilotEnrollmentStatus) -> PilotLocalEnrollment {
+        PilotLocalEnrollment(
+            participantID: UUID(),
+            studyID: UUID(),
+            studyName: "UI test pilot",
+            enrolledAt: referenceDate,
+            pilotClosesAt: referenceDate.addingTimeInterval(86_400),
+            resultsDeleteAfter: referenceDate.addingTimeInterval(86_400 * 365),
+            consent: PilotConsent(
+                version: PilotStudyConfiguration.consentVersion,
+                adultConfirmed: true,
+                shareScope: .resultsOnly,
+                acceptedAt: referenceDate
+            ),
+            status: status
         )
     }
 

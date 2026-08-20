@@ -175,6 +175,20 @@ final class PilotSubmissionCoordinator {
         self.submissions = PilotStudyStore.loadSubmissions()
     }
 
+    #if DEBUG
+    /// In-memory state seam for application UI tests. It never writes pilot
+    /// enrollment, tokens, invitation codes, or submissions to disk.
+    func configureForUITesting(
+        enrollment: PilotLocalEnrollment?,
+        submissions: [PilotSubmissionRecord] = []
+    ) {
+        self.enrollment = enrollment
+        self.submissions = submissions
+        isWorking = false
+        lastMessage = nil
+    }
+    #endif
+
     func enroll(inviteCode: String, consent: PilotConsent) async throws {
         guard consent.adultConfirmed else { throw PilotStudyError.adultConfirmationRequired }
         isWorking = true

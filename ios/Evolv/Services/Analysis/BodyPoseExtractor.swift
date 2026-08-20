@@ -46,6 +46,18 @@ enum BodyPoseExtractor {
             ))
         }
 
+        // Preserve the exact extraction threshold while reporting the missing
+        // anatomical requirement precisely to the validation preflight. These
+        // cases were previously collapsed into insufficientLandmarks.
+        if pose != .legs {
+            if !landmarks.contains(where: { $0.joint == "leftHip" || $0.joint == "rightHip" }) {
+                throw ExtractionError.hipsUnavailable
+            }
+            if !landmarks.contains(where: { $0.joint == "leftShoulder" || $0.joint == "rightShoulder" }) {
+                throw ExtractionError.shouldersUnavailable
+            }
+        }
+
         if landmarks.count < 4 {
             throw ExtractionError.insufficientLandmarks
         }
@@ -157,7 +169,11 @@ enum BodyPoseExtractor {
     }
 
     enum ExtractionError: Error {
-        case noImage, noObservation, insufficientLandmarks
+        case noImage
+        case noObservation
+        case hipsUnavailable
+        case shouldersUnavailable
+        case insufficientLandmarks
     }
 }
 

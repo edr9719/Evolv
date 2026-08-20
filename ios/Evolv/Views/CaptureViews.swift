@@ -203,7 +203,16 @@ struct CaptureFlowView: View {
         _sessionCameraPosition = State(initialValue: validationContext?.lockedCameraPosition)
     }
 
-    enum Phase: Equatable { case standard, review, askShowcase, showcase, finalizing, result }
+    enum Phase: Equatable {
+        case standard
+        case review
+        case askShowcase
+        case showcase
+        case checkingBaseline
+        case baselineBlocked
+        case finalizing
+        case result
+    }
 
     @State private var phase: Phase = .standard
     @State private var poseIndex = 0
@@ -238,6 +247,7 @@ struct CaptureFlowView: View {
     @State private var captureConfigurationIntent: CaptureConfigurationIntent = .matchActiveRecipe
     @State private var justCapturedPose: Pose? = nil
     @State private var resultScanID: UUID? = nil
+    @State private var baselinePreflight: ValidationBaselinePreflight? = nil
 
     private var standardPoses: [Pose] {
         let requested = repairPoses ?? Pose.required
@@ -400,6 +410,10 @@ struct CaptureFlowView: View {
                 isShowcase: true,
                 isLastInPhase: showcaseIndex == showcaseQueue.count - 1
             )
+        case .checkingBaseline:
+            baselineCheckingView
+        case .baselineBlocked:
+            baselineBlockedView
         case .finalizing:
             ProgressView()
                 .tint(EvolvTheme.accent)
@@ -413,6 +427,88 @@ struct CaptureFlowView: View {
                 )
             }
         }
+    }
+
+    private var baselineCheckingView: some View {
+        VStack(spacing: 18) {
+            Spacer()
+            ProgressView()
+                .tint(EvolvTheme.accent)
+                .scaleEffect(1.4)
+            Text("Checking Set 1 for comparison evidence…")
+                .font(.system(size: 20, weight: .semibold, design: .rounded))
+                .foregroundStyle(EvolvTheme.text)
+                .multilineTextAlignment(.center)
+            Text("Evolv is running the same on-device pose, outline, and region checks used by the final consistency comparison.")
+                .font(.system(size: 13, design: .rounded))
+                .foregroundStyle(EvolvTheme.textMuted)
+                .multilineTextAlignment(.center)
+                .lineSpacing(3)
+                .padding(.horizontal, 34)
+            Spacer()
+        }
+        .accessibilityIdentifier("validation.baseline.checking")
+    }
+
+    private var baselineBlockedView: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("SET 1 NEEDS A RETAKE")
+                        .font(.system(size: 10, weight: .semibold, design: .rounded))
+                        .tracking(1.4)
+                        .foregroundStyle(EvolvTheme.accent)
+                    Text("Let's fix the baseline before Set 2")
+                        .font(.system(size: 24, weight: .semibold, design: .rounded))
+                        .foregroundStyle(EvolvTheme.text)
+                    Text("Your photos are still saved on this iPhone. Evolv could not find all the evidence needed for future comparisons, so only the affected poses need another photo.")
+                        .font(.system(size: 13.5, design: .rounded))
+                        .foregroundStyle(EvolvTheme.textMuted)
+                        .lineSpacing(3)
+                }
+
+                if let preflight = baselinePreflight {
+                    ForEach(preflight.diagnostics) { issue in
+                        GlassCard(padding: 16, cornerRadius: 18) {
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(systemName: issue.kind == .systemError ? "exclamationmark.triangle" : "viewfinder.circle")
+                                    .font(.system(size: 18, weight: .medium))
+                                    .foregroundStyle(issue.kind == .systemError ? EvolvTheme.stable : EvolvTheme.accent)
+                                    .frame(width: 24)
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(issue.userTitle)
+                                        .font(.system(size: 14.5, weight: .semibold, design: .rounded))
+                                        .foregroundStyle(EvolvTheme.text)
+                                    Text(issue.userGuidance)
+                                        .font(.system(size: 12.5, design: .rounded))
+                                        .foregroundStyle(EvolvTheme.textMuted)
+                                        .lineSpacing(2)
+                                }
+                            }
+                        }
+                    }
+
+                    EvolvPrimaryButton(
+                        title: "Retake \(retakePoseList(preflight.posesNeedingRetake))",
+                        icon: "camera.fill"
+                    ) {
+                        beginTargetedBaselineRetake(preflight)
+                    }
+                    .accessibilityIdentifier("validation.baseline.retake")
+                }
+
+                Button("Save draft and exit") {
+                    leaveValidationDraft()
+                }
+                .font(.system(size: 13.5, weight: .semibold, design: .rounded))
+                .foregroundStyle(EvolvTheme.textMuted)
+                .frame(maxWidth: .infinity)
+                .buttonStyle(.plain)
+            }
+            .padding(22)
+        }
+        .scrollIndicators(.hidden)
+        .accessibilityIdentifier("validation.baseline.blocked")
     }
 
     // MARK: - Pose prompt
@@ -1134,8 +1230,10 @@ struct CaptureFlowView: View {
     private func advance() {
         switch phase {
         case .standard:
-            if poseIndex < standardPoses.count - 1 {
-                poseIndex += 1
+            let captured = Set(captures.map(\.pose))
+            if let next = standardPoses.indices.first(where: { $0 > poseIndex && !captured.contains(standardPoses[$0]) })
+                ?? standardPoses.indices.first(where: { !captured.contains(standardPoses[$0]) }) {
+                poseIndex = next
             } else if isRepairing || isValidationCapture {
                 finalize()
             } else {
@@ -1166,8 +1264,34 @@ struct CaptureFlowView: View {
             showLoadError = true
             return
         }
+        if let validationContext, validationContext.setNumber == 1 {
+            phase = .checkingBaseline
+            Task { @MainActor in
+                do {
+                    let preflight = try await app.preflightValidationBaseline(
+                        sessionID: validationContext.sessionID,
+                        captures: captures
+                    )
+                    baselinePreflight = preflight
+                    if preflight.isViable {
+                        persistFinalizedCapture()
+                    } else {
+                        phase = .baselineBlocked
+                    }
+                } catch {
+                    phase = .standard
+                    loadError = error.localizedDescription
+                    showLoadError = true
+                }
+            }
+            return
+        }
+        persistFinalizedCapture()
+    }
+
+    private func persistFinalizedCapture() {
         phase = .finalizing
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+        Task { @MainActor in
             do {
                 if let repairScanID {
                     let updated = try app.replaceCaptures(in: repairScanID, with: captures)
@@ -1201,6 +1325,41 @@ struct CaptureFlowView: View {
                 showLoadError = true
             }
         }
+    }
+
+    private func beginTargetedBaselineRetake(_ preflight: ValidationBaselinePreflight) {
+        guard let validationContext else { return }
+        let failed = Set(preflight.posesNeedingRetake)
+        guard !failed.isEmpty else { return }
+        let removed = captures.filter { failed.contains($0.pose) }
+        let retained = captures.filter { !failed.contains($0.pose) }
+        do {
+            if retained.isEmpty {
+                app.discardValidationDraft(sessionID: validationContext.sessionID)
+            } else {
+                try app.updateValidationDraft(
+                    sessionID: validationContext.sessionID,
+                    setNumber: validationContext.setNumber,
+                    captures: retained
+                )
+                PhotoStore.delete(named: removed.map(\.imageFilename))
+            }
+            captures = retained
+            baselinePreflight = nil
+            poseIndex = standardPoses.firstIndex(where: failed.contains) ?? 0
+            phase = .standard
+        } catch {
+            loadError = error.localizedDescription
+            showLoadError = true
+        }
+    }
+
+    private func retakePoseList(_ poses: [Pose]) -> String {
+        let names = poses.map { $0.shortLabel.lowercased() }
+        if names.count == 1 { return names[0] }
+        if names.count == 2 { return names.joined(separator: " and ") }
+        guard let last = names.last else { return "requested poses" }
+        return names.dropLast().joined(separator: ", ") + ", and " + last
     }
 }
 

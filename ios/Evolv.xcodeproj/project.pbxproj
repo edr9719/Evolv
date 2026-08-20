@@ -33,6 +33,7 @@
 		536942D73A972E9DD8F9149E /* PilotSubmissionCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BC6A07630ABF1DF6151B9F6 /* PilotSubmissionCoordinator.swift */; };
 		5B867545401AAC6279A4BEE8 /* CaptureViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE31A3D1FFBA72EFA0DDE6FD /* CaptureViews.swift */; };
 		5EBD345C8F917492B2D8A58C /* TimerCameraView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 751B8FE4521C5DC184F56228 /* TimerCameraView.swift */; };
+		5F0ECB0FCDD7BD73F170CCAD /* EvolvPilotFlowUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F619ED6F099B06CB2B48FF3B /* EvolvPilotFlowUITests.swift */; };
 		6A4CE6B9800B8F9B5A522B2A /* AnalysisStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB0A88C911F1B7F420E95A13 /* AnalysisStore.swift */; };
 		6C3A9A23571BD85EFD816EE8 /* TimelineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 247E2158364F7E8CFFD0091E /* TimelineView.swift */; };
 		6F8951603409D8FE058AC761 /* PhotoStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 432DD612B9BB30F9DDDE541C /* PhotoStore.swift */; };
@@ -63,6 +64,7 @@
 		C03121EE156E22E0E85F3568 /* SettingsNotificationsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1616FF85D0A1BA0D18DA3C4 /* SettingsNotificationsView.swift */; };
 		C2149BE85F98D0B7DC046D10 /* SettingsProfileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 157354E17091302B11803B97 /* SettingsProfileView.swift */; };
 		CEEE909A0283E02D86544F1D /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE56EEA08604AC39C72E781B /* Models.swift */; };
+		CFBC6B34C0FF14F198A821BF /* UITestBootstrap.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D2BE2985BEEEEC6AFF444B5 /* UITestBootstrap.swift */; };
 		D2220A7BC7D4980CD57AD973 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5B87D95DBD1A8656972FD64 /* HomeView.swift */; };
 		E415A58ADF3A6971A1D40B4D /* StatsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F70E6D87DC1D5FECC14AA87 /* StatsView.swift */; };
 		E54D7007B1CA7D4FCBB19047 /* AnalysisTruthfulnessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8A3C1FC4F72C6B397F7D910 /* AnalysisTruthfulnessTests.swift */; };
@@ -71,6 +73,13 @@
 
 /* Begin PBXContainerItemProxy section */
 		50DBCA85CFD7E5BC8122C6F5 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 03F42934572DB65CC5C7C850 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 874C11CF293C65A9E23D8D12;
+			remoteInfo = Evolv;
+		};
+		E7673C1B52A0F31597B38A8F /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 03F42934572DB65CC5C7C850 /* Project object */;
 			proxyType = 1;
@@ -93,6 +102,7 @@
 		27A64020B721DA2F3DF79410 /* TenXPreviewSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TenXPreviewSupport.swift; sourceTree = "<group>"; };
 		2C49CEE273808B860A1BFECD /* MeasurementSignalEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeasurementSignalEngine.swift; sourceTree = "<group>"; };
 		2EA3FB6AD95A81AFE04D61F0 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		300029768C25FC0E2B33FE0A /* EvolvUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = EvolvUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		33119299909B4F9B0850056A /* TrendSmoothingEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrendSmoothingEngine.swift; sourceTree = "<group>"; };
 		35B9D66DAD63552C97442447 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		3CE7D3C1A1682CEEDD8CF719 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
@@ -100,6 +110,7 @@
 		432DD612B9BB30F9DDDE541C /* PhotoStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoStore.swift; sourceTree = "<group>"; };
 		47408B2496C4DAC27AF958CA /* PaywallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaywallView.swift; sourceTree = "<group>"; };
 		4BC6A07630ABF1DF6151B9F6 /* PilotSubmissionCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PilotSubmissionCoordinator.swift; sourceTree = "<group>"; };
+		4D2BE2985BEEEEC6AFF444B5 /* UITestBootstrap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UITestBootstrap.swift; sourceTree = "<group>"; };
 		4D767923EF0AC4C222C02370 /* AnalysisV4Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisV4Tests.swift; sourceTree = "<group>"; };
 		4D77532747C3085279F27731 /* PurchaseService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PurchaseService.swift; sourceTree = "<group>"; };
 		5B6D9E9F3C03F77C17A6683F /* PilotStudyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PilotStudyStore.swift; sourceTree = "<group>"; };
@@ -143,6 +154,7 @@
 		E258544F5B0CDFBA846DFDA0 /* ScanPolicyPrivacyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanPolicyPrivacyTests.swift; sourceTree = "<group>"; };
 		EB0A88C911F1B7F420E95A13 /* AnalysisStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisStore.swift; sourceTree = "<group>"; };
 		EB2F98F7966BC2C051963A75 /* .keep */ = {isa = PBXFileReference; path = .keep; sourceTree = "<group>"; };
+		F619ED6F099B06CB2B48FF3B /* EvolvPilotFlowUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolvPilotFlowUITests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -160,6 +172,7 @@
 			children = (
 				DD6E272951F3470E723C5A8D /* Evolv */,
 				7D5A81D2047F55AB04F216D3 /* EvolvTests */,
+				685C2A6D7189DB8E6D5AE8BA /* EvolvUITests */,
 				1EDBE68C57282D1F50B6351E /* Public */,
 				318C8621337539AEDBDCCA77 /* StagedPrivate */,
 				C3DB0A8F7B41E0864EF71404 /* Products */,
@@ -228,6 +241,14 @@
 			path = Views;
 			sourceTree = "<group>";
 		};
+		685C2A6D7189DB8E6D5AE8BA /* EvolvUITests */ = {
+			isa = PBXGroup;
+			children = (
+				F619ED6F099B06CB2B48FF3B /* EvolvPilotFlowUITests.swift */,
+			);
+			path = EvolvUITests;
+			sourceTree = "<group>";
+		};
 		6BE5C48167C6D9FECAA4551D /* Components */ = {
 			isa = PBXGroup;
 			children = (
@@ -283,6 +304,7 @@
 			children = (
 				6BB8701F62BAC52665E26757 /* Evolv.app */,
 				019FE7983EC411E4AF276635 /* EvolvTests.xctest */,
+				300029768C25FC0E2B33FE0A /* EvolvUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -296,6 +318,7 @@
 				121CF10D46E7CC87E4CE59EA /* Info.plist */,
 				27A64020B721DA2F3DF79410 /* TenXPreviewSupport.swift */,
 				2EA3FB6AD95A81AFE04D61F0 /* Theme.swift */,
+				4D2BE2985BEEEEC6AFF444B5 /* UITestBootstrap.swift */,
 				6BE5C48167C6D9FECAA4551D /* Components */,
 				36C58AAEAE1C267F8DA268B9 /* Models */,
 				5CE4DE93896A0BDC9CBA4118 /* Services */,
@@ -316,6 +339,24 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		48395BE3522DF5A9E4D50831 /* EvolvUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 212C4B877AAB192804C5CEE4 /* Build configuration list for PBXNativeTarget "EvolvUITests" */;
+			buildPhases = (
+				CF0891E920628A6552992ECF /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				AC508BFBBBDACCEB96BDE662 /* PBXTargetDependency */,
+			);
+			name = EvolvUITests;
+			packageProductDependencies = (
+			);
+			productName = EvolvUITests;
+			productReference = 300029768C25FC0E2B33FE0A /* EvolvUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 		874C11CF293C65A9E23D8D12 /* Evolv */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 05EA81D5667E1EF7BC14218B /* Build configuration list for PBXNativeTarget "Evolv" */;
@@ -362,6 +403,11 @@
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
+					48395BE3522DF5A9E4D50831 = {
+						DevelopmentTeam = 359J9B4674;
+						ProvisioningStyle = Automatic;
+						TestTargetID = 874C11CF293C65A9E23D8D12;
+					};
 					874C11CF293C65A9E23D8D12 = {
 						DevelopmentTeam = 359J9B4674;
 						ProvisioningStyle = Automatic;
@@ -388,6 +434,7 @@
 			targets = (
 				874C11CF293C65A9E23D8D12 /* Evolv */,
 				F960154B0939BA5BC245A8E1 /* EvolvTests */,
+				48395BE3522DF5A9E4D50831 /* EvolvUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -475,12 +522,21 @@
 				6C3A9A23571BD85EFD816EE8 /* TimelineView.swift in Sources */,
 				5EBD345C8F917492B2D8A58C /* TimerCameraView.swift in Sources */,
 				52832D8BE2FDDF8D100846A0 /* TrendSmoothingEngine.swift in Sources */,
+				CFBC6B34C0FF14F198A821BF /* UITestBootstrap.swift in Sources */,
 				39194646F4252F024C66BC41 /* UnitFormatter.swift in Sources */,
 				4145F3AD62A084E4C9FE6ADD /* ValidationConsistencyEngine.swift in Sources */,
 				2F2DFF4E28DCCADA4CB3BAB3 /* ValidationStudyModels.swift in Sources */,
 				ACABEBDFC017C81B814E61B7 /* ValidationStudyStore.swift in Sources */,
 				4C7FFD99F85E99D95DC6C6E9 /* ValidationStudyView.swift in Sources */,
 				0A67C5A2ACE419518A305D10 /* VisualSignalEngine.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CF0891E920628A6552992ECF /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5F0ECB0FCDD7BD73F170CCAD /* EvolvPilotFlowUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -491,6 +547,11 @@
 			isa = PBXTargetDependency;
 			target = 874C11CF293C65A9E23D8D12 /* Evolv */;
 			targetProxy = 50DBCA85CFD7E5BC8122C6F5 /* PBXContainerItemProxy */;
+		};
+		AC508BFBBBDACCEB96BDE662 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 874C11CF293C65A9E23D8D12 /* Evolv */;
+			targetProxy = E7673C1B52A0F31597B38A8F /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -605,6 +666,27 @@
 			};
 			name = Release;
 		};
+		7F96B82B0AB8E6320A9DD9A5 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 359J9B4674;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.app.evolv.uitests;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Evolv;
+			};
+			name = Debug;
+		};
 		8EDCB4BC68DD5E7C49A66BFA /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -639,6 +721,27 @@
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
+		};
+		9B257E8601E3B6DFC9ADF0A6 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 359J9B4674;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.app.evolv.uitests;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Evolv;
+			};
+			name = Release;
 		};
 		CFB47B98F09513B1D73FB003 /* Debug */ = {
 			isa = XCBuildConfiguration;
@@ -731,6 +834,15 @@
 			buildConfigurations = (
 				8EDCB4BC68DD5E7C49A66BFA /* Debug */,
 				78C4D0D43B2A2552DE1983DF /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		212C4B877AAB192804C5CEE4 /* Build configuration list for PBXNativeTarget "EvolvUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7F96B82B0AB8E6320A9DD9A5 /* Debug */,
+				9B257E8601E3B6DFC9ADF0A6 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

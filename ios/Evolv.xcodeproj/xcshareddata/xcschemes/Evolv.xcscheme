@@ -37,6 +37,9 @@
          <TestPlanReference
             reference = "container:Evolv-Vision-Device.xctestplan">
          </TestPlanReference>
+         <TestPlanReference
+            reference = "container:Evolv-UI.xctestplan">
+         </TestPlanReference>
       </TestPlans>
       <MacroExpansion>
          <BuildableReference
@@ -56,6 +59,17 @@
                BlueprintIdentifier = "F960154B0939BA5BC245A8E1"
                BuildableName = "EvolvTests.xctest"
                BlueprintName = "EvolvTests"
+               ReferencedContainer = "container:Evolv.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "48395BE3522DF5A9E4D50831"
+               BuildableName = "EvolvUITests.xctest"
+               BlueprintName = "EvolvUITests"
                ReferencedContainer = "container:Evolv.xcodeproj">
             </BuildableReference>
          </TestableReference>

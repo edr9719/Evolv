@@ -4,11 +4,34 @@ import UIKit
 struct PilotEnrollmentSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var coordinator = PilotSubmissionCoordinator.shared
+    @State private var step: Step = .explanation
     @State private var inviteCode = ""
     @State private var shareScope: PilotShareScope = .resultsOnly
     @State private var adultConfirmed = false
     @State private var showDetails = false
     @State private var errorMessage: String?
+
+    let onEnrolled: (() -> Void)?
+
+    init(onEnrolled: (() -> Void)? = nil) {
+        self.onEnrolled = onEnrolled
+    }
+
+    private enum Step: Int, CaseIterable {
+        case explanation
+        case consent
+        case invite
+        case sharing
+
+        var title: String {
+            switch self {
+            case .explanation: return "About the pilot"
+            case .consent: return "Your choice"
+            case .invite: return "Invitation"
+            case .sharing: return "Sharing choice"
+            }
+        }
+    }
 
     var body: some View {
         NavigationStack {
@@ -16,66 +39,8 @@ struct PilotEnrollmentSheet: View {
                 AmbientBackground()
                 ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
-                        VStack(alignment: .leading, spacing: 7) {
-                            Text("HELP US CHECK EVOLV")
-                                .font(.system(size: 10, weight: .semibold, design: .rounded))
-                                .tracking(1.5)
-                                .foregroundStyle(EvolvTheme.accent)
-                            Text("Share a five-set consistency test")
-                                .font(.system(size: 24, weight: .semibold, design: .rounded))
-                                .foregroundStyle(EvolvTheme.text)
-                            Text("You will use Evolv normally. After the five sets, you decide what—if anything—is shared with us.")
-                                .font(.system(size: 13.5, design: .rounded))
-                                .foregroundStyle(EvolvTheme.textMuted)
-                                .lineSpacing(3)
-                        }
-
-                        SettingsGroup(header: "Invite") {
-                            TextField("Enter invite code", text: $inviteCode)
-                                .textInputAutocapitalization(.characters)
-                                .autocorrectionDisabled()
-                                .font(.system(size: 16, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(EvolvTheme.text)
-                                .padding(16)
-                        }
-
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("WHAT WOULD YOU SHARE?")
-                                .font(.system(size: 10, weight: .semibold, design: .rounded))
-                                .tracking(1.4)
-                                .foregroundStyle(EvolvTheme.textFaint)
-                            ForEach(PilotShareScope.allCases) { scope in
-                                scopeButton(scope)
-                            }
-                        }
-
-                        Button {
-                            withAnimation(.easeInOut(duration: 0.2)) { showDetails.toggle() }
-                        } label: {
-                            HStack {
-                                Text("How your data is used")
-                                Spacer()
-                                Image(systemName: showDetails ? "chevron.up" : "chevron.down")
-                            }
-                            .font(.system(size: 13.5, weight: .semibold, design: .rounded))
-                            .foregroundStyle(EvolvTheme.text)
-                            .padding(16)
-                            .background {
-                                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                    .fill(EvolvTheme.surface)
-                                    .stroke(EvolvTheme.stroke, lineWidth: 1)
-                            }
-                        }
-                        .buttonStyle(.plain)
-
-                        if showDetails { dataUseDetails.transition(.opacity.combined(with: .move(edge: .top))) }
-
-                        Toggle(isOn: $adultConfirmed) {
-                            Text("I am 18 or older and I choose to join this pilot.")
-                                .font(.system(size: 13, weight: .medium, design: .rounded))
-                                .foregroundStyle(EvolvTheme.text)
-                        }
-                        .tint(EvolvTheme.accent)
+                        stepHeader
+                        stepContent
 
                         if let errorMessage {
                             Text(errorMessage)
@@ -83,19 +48,7 @@ struct PilotEnrollmentSheet: View {
                                 .foregroundStyle(EvolvTheme.stalled)
                         }
 
-                        EvolvPrimaryButton(
-                            title: coordinator.isWorking ? "Joining…" : "Join pilot",
-                            icon: "checkmark.shield",
-                            enabled: !coordinator.isWorking && adultConfirmed && !inviteCode.isEmpty
-                        ) {
-                            join()
-                        }
-
-                        Text("Joining does not upload existing scans. A completed consistency test is shared only after you review and confirm it.")
-                            .font(.system(size: 11.5, design: .rounded))
-                            .foregroundStyle(EvolvTheme.textFaint)
-                            .multilineTextAlignment(.center)
-                            .frame(maxWidth: .infinity)
+                        stepAction
                     }
                     .padding(20)
                     .padding(.bottom, 30)
@@ -104,10 +57,168 @@ struct PilotEnrollmentSheet: View {
             .navigationTitle("Evolv pilot")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                if step != .explanation {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Back") {
+                            step = Step(rawValue: step.rawValue - 1) ?? .explanation
+                            errorMessage = nil
+                        }
+                        .tint(EvolvTheme.accent)
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Cancel") { dismiss() }.tint(EvolvTheme.accent)
                 }
             }
+        }
+    }
+
+    private var stepHeader: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("STEP \(step.rawValue + 1) OF \(Step.allCases.count)")
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .tracking(1.5)
+                .foregroundStyle(EvolvTheme.accent)
+            ProgressView(value: Double(step.rawValue + 1), total: Double(Step.allCases.count))
+                .tint(EvolvTheme.accent)
+            Text(step.title)
+                .font(.system(size: 24, weight: .semibold, design: .rounded))
+                .foregroundStyle(EvolvTheme.text)
+        }
+    }
+
+    @ViewBuilder
+    private var stepContent: some View {
+        switch step {
+        case .explanation:
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Help us check whether Evolv produces consistent results when five photo sets are taken under the same conditions.")
+                    .font(.system(size: 14, design: .rounded))
+                    .foregroundStyle(EvolvTheme.textMuted)
+                    .lineSpacing(3)
+                    .accessibilityIdentifier("pilot.enrollment.explanation")
+                enrollmentPoint("The test takes about 20–30 minutes and stays on this iPhone while you complete it.")
+                enrollmentPoint("After Set 5, you review the results and decide exactly what—if anything—to share.")
+                enrollmentPoint("Nothing uploads automatically. This pilot does not change your personal timeline photos.")
+            }
+        case .consent:
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Joining is optional. You can stop sharing later without deleting scans stored on this iPhone.")
+                    .font(.system(size: 13.5, design: .rounded))
+                    .foregroundStyle(EvolvTheme.textMuted)
+                    .lineSpacing(3)
+
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) { showDetails.toggle() }
+                } label: {
+                    HStack {
+                        Text("How your data is used")
+                        Spacer()
+                        Image(systemName: showDetails ? "chevron.up" : "chevron.down")
+                    }
+                    .font(.system(size: 13.5, weight: .semibold, design: .rounded))
+                    .foregroundStyle(EvolvTheme.text)
+                    .padding(16)
+                    .background {
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(EvolvTheme.surface)
+                            .stroke(EvolvTheme.stroke, lineWidth: 1)
+                    }
+                }
+                .buttonStyle(.plain)
+
+                if showDetails { dataUseDetails.transition(.opacity.combined(with: .move(edge: .top))) }
+
+                Toggle(isOn: $adultConfirmed) {
+                    Text("I am 18 or older and I choose to join this pilot.")
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .foregroundStyle(EvolvTheme.text)
+                }
+                .tint(EvolvTheme.accent)
+                .accessibilityIdentifier("pilot.enrollment.adult-consent")
+            }
+
+        case .invite:
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Enter the private invitation code Edgar gave you. It connects this iPhone to a disposable pilot participant record—not your name or Apple ID.")
+                    .font(.system(size: 13.5, design: .rounded))
+                    .foregroundStyle(EvolvTheme.textMuted)
+                    .lineSpacing(3)
+                SettingsGroup(header: "Invite code") {
+                    TextField("Enter invite code", text: $inviteCode)
+                        .textInputAutocapitalization(.characters)
+                        .autocorrectionDisabled()
+                        .font(.system(size: 16, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(EvolvTheme.text)
+                        .padding(16)
+                        .accessibilityIdentifier("pilot.enrollment.invite-code")
+                }
+            }
+
+        case .sharing:
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Choose a starting preference. After the test, you can change it before sharing.")
+                    .font(.system(size: 13.5, design: .rounded))
+                    .foregroundStyle(EvolvTheme.textMuted)
+                ForEach(PilotShareScope.allCases) { scope in
+                    scopeButton(scope)
+                }
+                Text("Results-only sends no photos. If you choose photos, you approve them one by one after Set 5 and they are encrypted on this iPhone before upload.")
+                    .font(.system(size: 11.5, design: .rounded))
+                    .foregroundStyle(EvolvTheme.textFaint)
+                    .lineSpacing(2)
+            }
+            .accessibilityIdentifier("pilot.enrollment.sharing-choice")
+        }
+    }
+
+    @ViewBuilder
+    private var stepAction: some View {
+        switch step {
+        case .explanation:
+            EvolvPrimaryButton(title: "Continue to consent", icon: "arrow.right") {
+                step = .consent
+            }
+            .accessibilityIdentifier("pilot.enrollment.continue")
+        case .consent:
+            EvolvPrimaryButton(
+                title: adultConfirmed ? "Continue to invitation" : "Confirm to continue",
+                icon: "arrow.right",
+                enabled: adultConfirmed
+            ) {
+                step = .invite
+            }
+        case .invite:
+            EvolvPrimaryButton(
+                title: inviteCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? "Enter your invite code"
+                    : "Continue to sharing choice",
+                icon: "arrow.right",
+                enabled: !inviteCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ) {
+                step = .sharing
+            }
+        case .sharing:
+            EvolvPrimaryButton(
+                title: coordinator.isWorking ? "Joining…" : "Join pilot",
+                icon: "checkmark.shield",
+                enabled: !coordinator.isWorking
+            ) {
+                join()
+            }
+            .accessibilityIdentifier("pilot.enrollment.join")
+        }
+    }
+
+    private func enrollmentPoint(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "checkmark.circle")
+                .foregroundStyle(EvolvTheme.accent)
+                .padding(.top, 1)
+            Text(text)
+                .font(.system(size: 12.5, design: .rounded))
+                .foregroundStyle(EvolvTheme.textMuted)
+                .lineSpacing(2)
         }
     }
 
@@ -169,6 +280,7 @@ struct PilotEnrollmentSheet: View {
         Task {
             do {
                 try await coordinator.enroll(inviteCode: inviteCode, consent: consent)
+                onEnrolled?()
                 dismiss()
             } catch {
                 errorMessage = error.localizedDescription
@@ -186,6 +298,7 @@ struct PilotSubmissionCard: View {
     @State private var selectedPhotoIDs: Set<UUID> = []
     @State private var photoApproval = false
     @State private var errorMessage: String?
+    @State private var showEnrollment = false
 
     private var choices: [PilotPhotoChoice] {
         PilotResultsBuilder.photoChoices(session: session, scans: scans)
@@ -203,10 +316,20 @@ struct PilotSubmissionCard: View {
                     .foregroundStyle(EvolvTheme.text)
 
                 if coordinator.enrollment?.status != .active {
-                    Text("This test remains only on this iPhone. Join the invited pilot before starting a future test if you want to share validation data.")
+                    Text("This completed test remains only on this iPhone. You can still join the invited pilot, then review this test and explicitly choose results only or individual photos.")
                         .font(.system(size: 12.5, design: .rounded))
                         .foregroundStyle(EvolvTheme.textMuted)
                         .lineSpacing(2)
+                    EvolvPrimaryButton(
+                        title: "Join pilot & review sharing",
+                        icon: "checkmark.shield"
+                    ) {
+                        showEnrollment = true
+                    }
+                    .accessibilityIdentifier("pilot.retrospective.join")
+                    Text("Joining does not upload this test. Sharing requires a separate confirmation after enrollment.")
+                        .font(.system(size: 11, design: .rounded))
+                        .foregroundStyle(EvolvTheme.textFaint)
                 } else if let existing, existing.status == .completed {
                     Label(existing.selectedPhotos.isEmpty ? "Results shared · no photos" : "Results and \(existing.selectedPhotos.count) selected photos shared", systemImage: "checkmark.circle.fill")
                         .font(.system(size: 13, weight: .semibold, design: .rounded))
@@ -262,6 +385,9 @@ struct PilotSubmissionCard: View {
                 selectedPhotoIDs = Set(existing.selectedPhotos.map(\.captureID))
                 photoApproval = !selectedPhotoIDs.isEmpty
             }
+        }
+        .sheet(isPresented: $showEnrollment) {
+            PilotEnrollmentSheet()
         }
     }
 

@@ -104,6 +104,29 @@ enum VisualSignalEngine {
         }
     }
 
+    /// Uses the same pose requirements and feature lookup as comparison
+    /// fusion to determine whether Set 1 can support the required shoulder,
+    /// chest, and waist comparisons. Arm evidence remains truthful but
+    /// optional because the validated public fixtures intentionally do not
+    /// promise isolated arm cross-sections. Keeping this beside `compare`
+    /// prevents capture preflight and final analysis from drifting apart.
+    static func baselineEvidenceDeficits(
+        profiles: [SilhouetteProfile]
+    ) -> [Pose: Set<BodyRegion>] {
+        var deficits: [Pose: Set<BodyRegion>] = [:]
+
+        for region in [BodyRegion.shoulders, .chest, .waist] {
+            for pose in expectedPoses(for: region).required {
+                guard let profile = profiles.first(where: { $0.pose == pose }) else { continue }
+                if featureValue(region, profile: profile) == nil {
+                    deficits[pose, default: []].insert(region)
+                }
+            }
+        }
+
+        return deficits
+    }
+
     /// Compares one pose only. This is the only path used for showcase
     /// evidence: optional poses never enter relaxed-pose fusion.
     static func comparePosePair(

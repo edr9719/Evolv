@@ -733,6 +733,26 @@ final class AppState {
 
     // MARK: - Local consistency test
 
+    /// Entry point for the invited five-set protocol. The existing lower-level
+    /// starter remains available for deliberately local engineering tests, but
+    /// the user-facing official pilot cannot be created without active consent.
+    @discardableResult
+    func startOfficialValidationSession(
+        cameraPosition: CaptureCameraPosition,
+        pilotEnrollment: PilotLocalEnrollment? = PilotStudyStore.loadEnrollment(),
+        now: Date = Date()
+    ) throws -> UUID {
+        guard ValidationStudyPolicy.canStartOfficialPilot(enrollment: pilotEnrollment) else {
+            throw ValidationStudyError.pilotEnrollmentRequired
+        }
+        return try startValidationSession(
+            cameraPosition: cameraPosition,
+            useEligibleCanonical: false,
+            pilotEnrollment: pilotEnrollment,
+            now: now
+        )
+    }
+
     @discardableResult
     func startValidationSession(
         cameraPosition: CaptureCameraPosition,
@@ -795,7 +815,9 @@ final class AppState {
             draftCaptures: [],
             result: nil,
             statusReasons: [],
-            completedAt: nil
+            completedAt: nil,
+            baselinePreflightRequired: !useEligibleCanonical,
+            baselinePreflight: nil
         )
         let candidateSessions = validationSessions + [session]
 
@@ -864,6 +886,10 @@ final class AppState {
         var candidate = validationSessions
         candidate[index].draftSetNumber = setNumber
         candidate[index].draftCaptures = captures
+        if setNumber == 1,
+           candidate[index].baselinePreflight?.matches(captures) != true {
+            candidate[index].baselinePreflight = nil
+        }
         try ValidationStudyStore.save(candidate)
         validationSessions = candidate
     }
@@ -874,9 +900,53 @@ final class AppState {
         var candidate = validationSessions
         candidate[index].draftSetNumber = nil
         candidate[index].draftCaptures = []
+        if candidate[index].nextSetNumber == 1 {
+            candidate[index].baselinePreflight = nil
+        }
         guard (try? ValidationStudyStore.save(candidate)) != nil else { return }
         validationSessions = candidate
         PhotoStore.delete(named: filenames)
+    }
+
+    /// Runs and durably records the same downstream evidence path used by the
+    /// final consistency comparison. The result is tied to exact capture IDs so
+    /// replacing any photo necessarily requires a fresh check.
+    func preflightValidationBaseline(
+        sessionID: UUID,
+        captures: [PoseCapture],
+        now: Date = Date()
+    ) async throws -> ValidationBaselinePreflight {
+        refreshValidationSessionEligibility(now: now)
+        guard let initialIndex = validationSessions.firstIndex(where: { $0.id == sessionID }),
+              validationSessions[initialIndex].status == .active,
+              validationSessions[initialIndex].nextSetNumber == 1,
+              ValidationStudyPolicy.isValidCompletedSet(
+                captures,
+                position: validationSessions[initialIndex].lockedCameraPosition,
+                lockedLensType: validationSessions[initialIndex].lockedLensType
+              ) else {
+            throw ValidationStudyError.invalidCameraConfiguration
+        }
+
+        let preflight = await ValidationConsistencyEngine.preflightBaseline(
+            captures: captures,
+            scanID: sessionID,
+            now: now
+        )
+
+        refreshValidationSessionEligibility(now: now)
+        guard let freshIndex = validationSessions.firstIndex(where: { $0.id == sessionID }),
+              validationSessions[freshIndex].status == .active,
+              validationSessions[freshIndex].nextSetNumber == 1,
+              validationSessions[freshIndex].draftSetNumber == 1,
+              Set(validationSessions[freshIndex].draftCaptures.map(\.id)) == Set(captures.map(\.id)) else {
+            throw ValidationStudyError.sessionUnavailable
+        }
+        var candidate = validationSessions
+        candidate[freshIndex].baselinePreflight = preflight
+        try ValidationStudyStore.save(candidate)
+        validationSessions = candidate
+        return preflight
     }
 
     @discardableResult
@@ -906,6 +976,13 @@ final class AppState {
               configuration.position == session.lockedCameraPosition,
               session.lockedLensType == nil || session.lockedLensType == configuration.lensType else {
             throw ValidationStudyError.invalidCameraConfiguration
+        }
+        guard ValidationStudyPolicy.hasRequiredBaselineEvidence(
+            session: session,
+            committingSetNumber: setNumber,
+            captures: captures
+        ) else {
+            throw ValidationStudyError.baselineEvidenceRequired
         }
 
         let role: ScanRole

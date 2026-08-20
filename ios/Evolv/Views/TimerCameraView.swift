@@ -488,7 +488,7 @@ private struct PoseAlignmentGuide: View {
             }
         }
         .overlay(alignment: .top) {
-            Text(pose == .legs ? "ALIGN HIPS · KNEES · FEET" : "ALIGN HEAD · SHOULDERS · HIPS · HANDS")
+            Text(alignmentTitle)
                 .font(.system(size: 9, weight: .bold, design: .rounded))
                 .tracking(1.1)
                 .foregroundStyle(.white.opacity(0.88))
@@ -498,6 +498,17 @@ private struct PoseAlignmentGuide: View {
                 .offset(y: -13)
         }
         .accessibilityHidden(true)
+    }
+
+    private var alignmentTitle: String {
+        switch pose {
+        case .legs:
+            return "ALIGN HIPS · KNEES · FEET"
+        case .front, .side, .back:
+            return "ALIGN HEAD · HIPS · HANDS · UPPER LEGS"
+        default:
+            return "ALIGN HEAD · SHOULDERS · HIPS · HANDS"
+        }
     }
 
     private func zoneView(_ zone: AlignmentZone, in size: CGSize) -> some View {
@@ -533,6 +544,15 @@ private struct PoseAlignmentGuide: View {
                 AlignmentZone("FOOT", x: 0.62, y: 0.90, width: 0.20, height: 0.09)
             ]
         case .side, .sideChest:
+            if pose == .side {
+                return [
+                    AlignmentZone("HEAD", x: 0.50, y: 0.10, width: 0.20, height: 0.12),
+                    AlignmentZone("SHOULDER", x: 0.50, y: 0.28, width: 0.27, height: 0.07),
+                    AlignmentZone("HIPS", x: 0.50, y: 0.56, width: 0.28, height: 0.08),
+                    AlignmentZone("HAND", x: 0.55, y: 0.65, width: 0.17, height: 0.10),
+                    AlignmentZone("UPPER LEGS", x: 0.50, y: 0.77, width: 0.34, height: 0.16)
+                ]
+            }
             return [
                 AlignmentZone("HEAD", x: 0.50, y: 0.13, width: 0.22, height: 0.14),
                 AlignmentZone("SHOULDER", x: 0.50, y: 0.34, width: 0.28, height: 0.08),
@@ -553,6 +573,15 @@ private struct PoseAlignmentGuide: View {
                 AlignmentZone("SHOULDERS", x: 0.50, y: 0.37, width: 0.56, height: 0.08),
                 AlignmentZone("HANDS", x: 0.50, y: 0.58, width: 0.26, height: 0.11),
                 AlignmentZone("HIPS", x: 0.50, y: 0.72, width: 0.36, height: 0.08)
+            ]
+        case .front, .back:
+            return [
+                AlignmentZone("HEAD", x: 0.50, y: 0.10, width: 0.20, height: 0.12),
+                AlignmentZone("SHOULDERS", x: 0.50, y: 0.28, width: 0.52, height: 0.07),
+                AlignmentZone("HIPS", x: 0.50, y: 0.56, width: 0.36, height: 0.08),
+                AlignmentZone("HAND", x: 0.28, y: 0.65, width: 0.13, height: 0.10),
+                AlignmentZone("HAND", x: 0.72, y: 0.65, width: 0.13, height: 0.10),
+                AlignmentZone("UPPER LEGS", x: 0.50, y: 0.77, width: 0.46, height: 0.16)
             ]
         default:
             return [

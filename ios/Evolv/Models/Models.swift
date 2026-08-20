@@ -120,8 +120,8 @@ enum Pose: String, CaseIterable, Codable, Identifiable {
         }
     }
 
-    /// Framing expectation used by the quality gate. Standard relaxed poses
-    /// only require torso-and-up framing; legs require lower-body framing.
+    /// Framing expectation used by the quality gate. Relaxed poses include the
+    /// upper legs because reliable hip evidence is required downstream.
     enum Framing { case torsoUp, fullBody, legsOnly }
     var framing: Framing {
         switch self {
@@ -166,9 +166,9 @@ enum Pose: String, CaseIterable, Codable, Identifiable {
 
     var subtitle: String {
         switch self {
-        case .front: return "Head through waist or upper thighs. Keep both relaxed arms visible."
-        case .side:  return "Profile view, neutral posture. Show head through waist and your relaxed arm."
-        case .back:  return "Head through waist or upper thighs. Match the front photo's distance."
+        case .front: return "Head through mid-thigh. Keep both hip creases, upper legs, and relaxed arms visible."
+        case .side:  return "True profile, head through mid-thigh. Keep the hip crease, upper legs, and relaxed arm visible."
+        case .back:  return "Head through mid-thigh. Keep both hips and upper legs visible at the front photo's distance."
         case .frontDoubleBicep: return "Hands through upper thighs. Keep both elbows inside the frame."
         case .sideChest:        return "Head through upper thighs. Keep the complete arm position visible."
         case .backDoubleBicep:  return "Hands through upper thighs. Keep both elbows inside the frame."
@@ -200,13 +200,20 @@ enum Pose: String, CaseIterable, Codable, Identifiable {
             return "Raised hands through upper thighs"
         case .legs:
             return "Waist through feet"
+        case .front, .side, .back:
+            return "Head through mid-thigh"
         default:
             return "Head through upper thighs"
         }
     }
 
     var cameraHeightText: String {
-        self == .legs ? "Phone at hip height" : "Phone at lower-chest height"
+        switch self {
+        case .front, .side, .back, .legs:
+            return "Phone at waist height"
+        default:
+            return "Phone at lower-chest height"
+        }
     }
 
     func reviewChecklist(matchingPrevious: Bool) -> [String] {
@@ -235,7 +242,7 @@ enum Pose: String, CaseIterable, Codable, Identifiable {
             ]
         default:
             return [
-                "Head and hips visible",
+                "Head, hip creases, and upper thighs visible",
                 "Arms separated from torso",
                 "No strong connected shadow",
                 matchText

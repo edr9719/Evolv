@@ -3,8 +3,18 @@ import UIKit
 
 @main
 struct EvolvApp: App {
-    @State private var appState = AppState()
-    @State private var pilotSharing = PilotSubmissionCoordinator.shared
+    @State private var appState: AppState
+    @State private var pilotSharing: PilotSubmissionCoordinator
+
+    init() {
+        let state = AppState()
+        let pilot = PilotSubmissionCoordinator.shared
+        #if DEBUG
+        EvolvUITestBootstrap.applyIfRequested(to: state, pilot: pilot)
+        #endif
+        _appState = State(initialValue: state)
+        _pilotSharing = State(initialValue: pilot)
+    }
 
     var body: some Scene {
         WindowGroup {

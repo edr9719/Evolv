@@ -15,7 +15,42 @@ enum ValidationConsistencyEngine {
         var extractedPoses: [ExtractedPose]
         var profiles: [SilhouetteProfile]
         var cameraMetadata: [Pose: CaptureCameraMetadata]
-        var failures: [String: String]
+        var diagnostics: [ValidationPoseDiagnostic]
+    }
+
+    /// Runs the exact pose extractor, person segmentation, silhouette sampler,
+    /// and region-feature contract used by the real comparison engine. This is
+    /// deliberately not a capture-quality approximation.
+    static func preflightBaseline(
+        captures: [PoseCapture],
+        scanID: UUID = UUID(),
+        loadPhoto: @escaping (String) -> UIImage? = { PhotoStore.loadImage(named: $0) },
+        now: Date = Date()
+    ) async -> ValidationBaselinePreflight {
+        var processed = await process(
+            captures: captures,
+            scanID: scanID,
+            setNumber: 1,
+            baseline: nil,
+            loadPhoto: loadPhoto
+        )
+        appendRequiredFeatureDiagnostics(to: &processed, setNumber: 1)
+        return ValidationBaselinePreflight(
+            checkedAt: now,
+            captureIDs: Pose.required.compactMap { pose in captures.first { $0.pose == pose }?.id },
+            poseEvidence: Pose.required.map { pose in
+                let profile = processed.profiles.first { $0.pose == pose }
+                return ValidationPoseEvidence(
+                    pose: pose,
+                    poseExtracted: processed.extractedPoses.contains { $0.pose == pose },
+                    silhouetteGenerated: profile != nil,
+                    supportedRegions: profile?.regionFeatures?
+                        .filter { $0.evidenceReason == nil }
+                        .map(\.region) ?? []
+                )
+            },
+            diagnostics: processed.diagnostics.sorted(by: diagnosticSort)
+        )
     }
 
     static func evaluate(
@@ -42,11 +77,13 @@ enum ValidationConsistencyEngine {
             )
         }
 
-        let baseline = await process(
+        var baseline = await process(
             scan: anchor,
+            setNumber: 1,
             baseline: nil,
             loadPhoto: loadPhoto
         )
+        appendRequiredFeatureDiagnostics(to: &baseline, setNumber: 1)
         var results: [Int: ValidationSetComparison] = [:]
 
         for record in session.sets.sorted(by: { $0.setNumber < $1.setNumber }) where record.setNumber > 1 {
@@ -55,17 +92,20 @@ enum ValidationConsistencyEngine {
                 results[record.setNumber] = ValidationSetComparison(
                     setNumber: record.setNumber,
                     regionalComparisons: [],
-                    failures: ["scan": "scan_missing"],
+                    failures: ["set_\(record.setNumber).scan": "scan_missing"],
                     hasSufficientCoreEvidence: false,
-                    processingDurationMilliseconds: Int(Date().timeIntervalSince(comparisonStartedAt) * 1_000)
+                    processingDurationMilliseconds: Int(Date().timeIntervalSince(comparisonStartedAt) * 1_000),
+                    diagnostics: []
                 )
                 continue
             }
-            let current = await process(
+            var current = await process(
                 scan: scan,
+                setNumber: record.setNumber,
                 baseline: baseline,
                 loadPhoto: loadPhoto
             )
+            appendRequiredFeatureDiagnostics(to: &current, setNumber: record.setNumber)
             let comparisons = VisualSignalEngine.comparePair(
                 baselineProfiles: baseline.profiles,
                 currentProfiles: current.profiles,
@@ -77,14 +117,15 @@ enum ValidationConsistencyEngine {
             let supportedCore = Set(comparisons
                 .filter { $0.status != .unavailable }
                 .map(\.region))
-            var failures = baseline.failures
-            current.failures.forEach { failures[$0.key] = $0.value }
+            let diagnostics = (baseline.diagnostics + current.diagnostics)
+                .sorted(by: diagnosticSort)
             results[record.setNumber] = ValidationSetComparison(
                 setNumber: record.setNumber,
                 regionalComparisons: comparisons,
-                failures: failures,
+                failures: failureMap(for: diagnostics),
                 hasSufficientCoreEvidence: coreRegions.isSubset(of: supportedCore),
-                processingDurationMilliseconds: Int(Date().timeIntervalSince(comparisonStartedAt) * 1_000)
+                processingDurationMilliseconds: Int(Date().timeIntervalSince(comparisonStartedAt) * 1_000),
+                diagnostics: diagnostics
             )
         }
 
@@ -99,9 +140,9 @@ enum ValidationConsistencyEngine {
     }
 
     /// Kept separate from Vision so the safety semantics can be exhaustively
-    /// unit-tested. A processing failure is reviewable rather than silently
-    /// downgraded to a clean result; missing supported regions without an
-    /// explicit pipeline failure remains limited evidence.
+    /// unit-tested. Detector abstention is limited evidence; only a genuine
+    /// system error, condition change, comparability change, or unexpected
+    /// supported signal requires review.
     static func classify(
         session: ValidationStudySession,
         comparisonsBySet results: [Int: ValidationSetComparison]
@@ -111,7 +152,22 @@ enum ValidationConsistencyEngine {
                 guard let conditions = record.conditions else { return true }
                 return !conditions.stayedTheSame || !conditions.deviations.isEmpty
             }
-        let hasProcessingFailure = results.values.contains { !$0.failures.isEmpty }
+        let hasSystemFailure = results.values.contains { result in
+            if let diagnostics = result.diagnostics, !diagnostics.isEmpty {
+                return diagnostics.contains { $0.kind == .systemError }
+            }
+            // Older records and non-pose failures have no typed diagnostics;
+            // retaining review semantics is the safest backward-compatible path.
+            return !result.failures.isEmpty
+        }
+        let hasComparabilityChange = results.values.contains { result in
+            result.diagnostics?.contains { $0.kind == .comparabilityChange } == true
+                || result.regionalComparisons.flatMap(\.contributions).contains { contribution in
+                    contribution.reason == "pose_not_comparable"
+                        || contribution.reason == "camera_configuration_changed"
+                        || contribution.reason == "cross_pose_conflict"
+                }
+        }
         let hasUnexpectedSignal = results.values.contains { result in
             result.regionalComparisons.contains {
                 $0.status == .increase
@@ -123,7 +179,7 @@ enum ValidationConsistencyEngine {
         let sufficientCoreEveryTime = hasAllFourComparisons
             && results.values.allSatisfy(\.hasSufficientCoreEvidence)
 
-        if hasDeviation || hasProcessingFailure || hasUnexpectedSignal {
+        if hasDeviation || hasSystemFailure || hasComparabilityChange || hasUnexpectedSignal {
             return .needsReview
         }
         return sufficientCoreEveryTime ? .consistent : .limitedEvidence
@@ -131,20 +187,54 @@ enum ValidationConsistencyEngine {
 
     private static func process(
         scan: Scan,
+        setNumber: Int,
+        baseline: ProcessedScan?,
+        loadPhoto: @escaping (String) -> UIImage?
+    ) async -> ProcessedScan {
+        await process(
+            captures: scan.captures,
+            scanID: scan.id,
+            setNumber: setNumber,
+            baseline: baseline,
+            loadPhoto: loadPhoto
+        )
+    }
+
+    private static func process(
+        captures: [PoseCapture],
+        scanID: UUID,
+        setNumber: Int,
         baseline: ProcessedScan?,
         loadPhoto: @escaping (String) -> UIImage?
     ) async -> ProcessedScan {
         var extracted: [ExtractedPose] = []
         var profiles: [SilhouetteProfile] = []
-        var failures: [String: String] = [:]
-        let cameraMetadata = Dictionary(uniqueKeysWithValues: scan.standardCaptures.compactMap { capture in
-            capture.cameraMetadata.map { (capture.pose, $0) }
-        })
+        var diagnostics: [ValidationPoseDiagnostic] = []
+        let metadataPairs: [(Pose, CaptureCameraMetadata)] = captures.compactMap { capture in
+            guard Pose.required.contains(capture.pose), let metadata = capture.cameraMetadata else { return nil }
+            return (capture.pose, metadata)
+        }
+        let cameraMetadata = Dictionary(uniqueKeysWithValues: metadataPairs)
 
         for pose in Pose.required {
-            guard let capture = scan.capture(for: pose),
-                  let image = loadPhoto(capture.imageFilename) else {
-                failures[pose.rawValue] = "photo_load_failed"
+            guard let capture = captures.first(where: { $0.pose == pose }) else {
+                diagnostics.append(diagnostic(
+                    setNumber: setNumber,
+                    pose: pose,
+                    stage: .photoLoading,
+                    kind: .systemError,
+                    code: "photo_load_failed"
+                ))
+                continue
+            }
+            guard let image = loadPhoto(capture.imageFilename) else {
+                diagnostics.append(diagnostic(
+                    setNumber: setNumber,
+                    pose: pose,
+                    stage: .photoLoading,
+                    kind: .systemError,
+                    code: "photo_load_failed"
+                ))
                 continue
             }
             let prepared = PhotoStore.prepare(image).image
@@ -152,7 +242,7 @@ enum ValidationConsistencyEngine {
                 var bodyPose = try await BodyPoseExtractor.extract(
                     from: prepared,
                     pose: pose,
-                    scanId: scan.id
+                    scanId: scanID
                 )
                 if let baselinePose = baseline?.extractedPoses.first(where: { $0.pose == pose }) {
                     bodyPose.poseMatchScore = NormalizationEngine.computePoseMatchScore(
@@ -168,10 +258,18 @@ enum ValidationConsistencyEngine {
                     )
                     profiles.append(profile)
                 } catch {
-                    failures["\(pose.rawValue)_silhouette"] = "silhouette_processing_failed"
+                    diagnostics.append(silhouetteDiagnostic(
+                        error: error,
+                        setNumber: setNumber,
+                        pose: pose
+                    ))
                 }
             } catch {
-                failures[pose.rawValue] = "pose_extraction_failed"
+                diagnostics.append(poseDiagnostic(
+                    error: error,
+                    setNumber: setNumber,
+                    pose: pose
+                ))
             }
         }
 
@@ -179,7 +277,117 @@ enum ValidationConsistencyEngine {
             extractedPoses: extracted,
             profiles: profiles,
             cameraMetadata: cameraMetadata,
-            failures: failures
+            diagnostics: diagnostics
         )
+    }
+
+    private static func appendRequiredFeatureDiagnostics(
+        to processed: inout ProcessedScan,
+        setNumber: Int
+    ) {
+        let deficits = VisualSignalEngine.baselineEvidenceDeficits(profiles: processed.profiles)
+        for pose in Pose.required {
+            guard let regions = deficits[pose], !regions.isEmpty else { continue }
+            processed.diagnostics.append(diagnostic(
+                setNumber: setNumber,
+                pose: pose,
+                stage: .regionFeatures,
+                kind: .evidenceUnavailable,
+                code: "required_region_feature_unavailable",
+                affectedRegions: regions.sorted { $0.rawValue < $1.rawValue }
+            ))
+        }
+    }
+
+    private static func poseDiagnostic(
+        error: Error,
+        setNumber: Int,
+        pose: Pose
+    ) -> ValidationPoseDiagnostic {
+        guard let extraction = error as? BodyPoseExtractor.ExtractionError else {
+            return diagnostic(
+                setNumber: setNumber,
+                pose: pose,
+                stage: .poseExtraction,
+                kind: .systemError,
+                code: "unexpected_pose_processing_error"
+            )
+        }
+        switch extraction {
+        case .noImage:
+            return diagnostic(setNumber: setNumber, pose: pose, stage: .photoLoading, kind: .systemError, code: "image_decode_failed")
+        case .hipsUnavailable:
+            return diagnostic(setNumber: setNumber, pose: pose, stage: .hipLandmarks, kind: .evidenceUnavailable, code: "hip_landmarks_unavailable")
+        case .shouldersUnavailable:
+            return diagnostic(setNumber: setNumber, pose: pose, stage: .poseExtraction, kind: .evidenceUnavailable, code: "shoulder_landmarks_unavailable")
+        case .noObservation, .insufficientLandmarks:
+            return diagnostic(setNumber: setNumber, pose: pose, stage: .poseExtraction, kind: .evidenceUnavailable, code: "body_pose_unavailable")
+        }
+    }
+
+    private static func silhouetteDiagnostic(
+        error: Error,
+        setNumber: Int,
+        pose: Pose
+    ) -> ValidationPoseDiagnostic {
+        guard let silhouette = error as? SilhouetteAnalyzer.AnalysisError else {
+            return diagnostic(
+                setNumber: setNumber,
+                pose: pose,
+                stage: .silhouette,
+                kind: .systemError,
+                code: "unexpected_silhouette_processing_error"
+            )
+        }
+        switch silhouette {
+        case .noImage:
+            return diagnostic(setNumber: setNumber, pose: pose, stage: .photoLoading, kind: .systemError, code: "image_decode_failed")
+        case .noSegmentation:
+            return diagnostic(setNumber: setNumber, pose: pose, stage: .segmentation, kind: .evidenceUnavailable, code: "person_segmentation_unavailable")
+        case .insufficientLandmarks:
+            return diagnostic(setNumber: setNumber, pose: pose, stage: .hipLandmarks, kind: .evidenceUnavailable, code: "hip_landmarks_unavailable")
+        case .invalidReferenceScale:
+            return diagnostic(setNumber: setNumber, pose: pose, stage: .silhouette, kind: .evidenceUnavailable, code: "torso_scale_unavailable")
+        case .insufficientEvidence:
+            return diagnostic(setNumber: setNumber, pose: pose, stage: .regionFeatures, kind: .evidenceUnavailable, code: "silhouette_evidence_unavailable")
+        }
+    }
+
+    private static func diagnostic(
+        setNumber: Int,
+        pose: Pose,
+        stage: ValidationEvidenceStage,
+        kind: ValidationDiagnosticKind,
+        code: String,
+        affectedRegions: [BodyRegion] = []
+    ) -> ValidationPoseDiagnostic {
+        ValidationPoseDiagnostic(
+            setNumber: setNumber,
+            pose: pose,
+            stage: stage,
+            kind: kind,
+            code: code,
+            affectedRegions: affectedRegions
+        )
+    }
+
+    private static func failureMap(
+        for diagnostics: [ValidationPoseDiagnostic]
+    ) -> [String: String] {
+        diagnostics.reduce(into: [:]) { result, item in
+            let key = "set_\(item.setNumber).\(item.pose.rawValue).\(item.stage.rawValue)"
+            result[key] = item.code
+        }
+    }
+
+    private static func diagnosticSort(
+        _ lhs: ValidationPoseDiagnostic,
+        _ rhs: ValidationPoseDiagnostic
+    ) -> Bool {
+        if lhs.setNumber != rhs.setNumber { return lhs.setNumber < rhs.setNumber }
+        let leftPose = Pose.required.firstIndex(of: lhs.pose) ?? Int.max
+        let rightPose = Pose.required.firstIndex(of: rhs.pose) ?? Int.max
+        if leftPose != rightPose { return leftPose < rightPose }
+        return lhs.stage.rawValue < rhs.stage.rawValue
     }
 }

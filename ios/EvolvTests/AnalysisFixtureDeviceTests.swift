@@ -247,6 +247,43 @@ final class AnalysisFixtureDeviceTests: XCTestCase {
         ))
     }
 
+    func testPublicMandatoryFixturesPassSetOneDownstreamPreflight() async throws {
+        let manifest = try loadManifest()
+        let required = manifest.fixtures.filter { $0.expectedCondition == "valid_mandatory" }
+        let camera = CaptureCameraMetadata(
+            position: .rear,
+            lensType: "public-fixture-wide",
+            previewMirrored: false,
+            outputMirrored: false,
+            sourceOrientation: .up,
+            normalizedOrientation: .up
+        )
+        var images: [String: UIImage] = [:]
+        let captures = try required.map { fixture -> PoseCapture in
+            let filename = "preflight-\(fixture.pose.rawValue).jpg"
+            images[filename] = try image(for: fixture)
+            return PoseCapture(
+                pose: fixture.pose,
+                imageFilename: filename,
+                avgBrightness: 0.5,
+                aspectRatio: 0.75,
+                captureSource: .camera,
+                assessment: .legacyUnverified(),
+                normalizedPixelSize: NormalizedPixelSize(width: 1_200, height: 1_600),
+                cameraMetadata: camera
+            )
+        }
+
+        let preflight = await ValidationConsistencyEngine.preflightBaseline(
+            captures: captures,
+            loadPhoto: { images[$0] }
+        )
+
+        XCTAssertTrue(preflight.isViable, preflight.diagnostics.map(\.id).joined(separator: ", "))
+        XCTAssertEqual(Set(preflight.poseEvidence.map(\.pose)), Set(Pose.required))
+        XCTAssertTrue(preflight.poseEvidence.allSatisfy { $0.poseExtracted && $0.silhouetteGenerated })
+    }
+
     func testFiveSetConsistencyProtocolWithIdenticalPublicFixtures() async throws {
         let manifest = try loadManifest()
         let required = manifest.fixtures.filter { $0.expectedCondition == "valid_mandatory" }
