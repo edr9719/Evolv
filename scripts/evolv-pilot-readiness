@@ -157,9 +157,11 @@ run_local_gates() {
     "$REPO_ROOT/supabase/functions/pilot-api/index.ts" \
     "$REPO_ROOT/supabase/functions/pilot-admin/index.ts" \
     "$REPO_ROOT/supabase/functions/pilot-retention/index.ts" \
-    "$REPO_ROOT/supabase/functions/_shared/pilot_uploads_test.ts"
+    "$REPO_ROOT/supabase/functions/_shared/pilot_uploads_test.ts" \
+    "$REPO_ROOT/supabase/functions/_shared/pilot_results_validation_test.ts"
   npx --yes deno test \
-    "$REPO_ROOT/supabase/functions/_shared/pilot_uploads_test.ts"
+    "$REPO_ROOT/supabase/functions/_shared/pilot_uploads_test.ts" \
+    "$REPO_ROOT/supabase/functions/_shared/pilot_results_validation_test.ts"
   ruby -c "$SCRIPT_DIR/evolv-pilot" >/dev/null
   ruby -c "$SCRIPT_DIR/evolv-validation-stats" >/dev/null
   ruby -c "$SCRIPT_DIR/evolv-fixture-audit" >/dev/null

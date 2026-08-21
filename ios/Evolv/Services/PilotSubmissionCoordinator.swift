@@ -677,12 +677,16 @@ final class PilotSubmissionCoordinator {
         submissions = PilotStudyStore.loadSubmissions()
     }
 
-    private static func reasonCode(for error: Error) -> String {
+    static func reasonCode(for error: Error) -> String {
         switch error {
         case PilotStudyError.participantTokenMissing: return "participant_token_missing"
         case PilotStudyError.photoUnavailable: return "selected_photo_unavailable"
         case PilotStudyError.storageFailed: return "local_storage_failed"
         case PilotStudyError.payloadRejected: return "payload_rejected"
+        case PilotStudyError.serviceRejected(let code, _): return code
+        case PilotStudyError.offline: return "offline"
+        case PilotStudyError.uploadFailed: return "secure_upload_failed"
+        case PilotStudyError.rateLimited: return "rate_limited"
         default: return "network_or_service_failure"
         }
     }

@@ -176,7 +176,7 @@ struct ValidationStudyView: View {
                 Text("A fresh Set 1 is required")
                     .font(.system(size: 13.5, weight: .semibold, design: .rounded))
                     .foregroundStyle(EvolvTheme.text)
-                Text("Before Set 2, Evolv will run its full on-device comparison-evidence check. If one pose is unusable, you retake only that pose.")
+                Text("Evolv checks Set 1 for usable evidence, then compares every repeat with Set 1 before it can be saved. If one pose is not comparable, you retake only that pose.")
                     .font(.system(size: 12.5, design: .rounded))
                     .foregroundStyle(EvolvTheme.textMuted)
                     .lineSpacing(2)

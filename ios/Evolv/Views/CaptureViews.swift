@@ -248,6 +248,7 @@ struct CaptureFlowView: View {
     @State private var justCapturedPose: Pose? = nil
     @State private var resultScanID: UUID? = nil
     @State private var baselinePreflight: ValidationBaselinePreflight? = nil
+    @State private var repeatPreflight: ValidationSetPreflight? = nil
 
     private var standardPoses: [Pose] {
         let requested = repairPoses ?? Pose.required
@@ -435,11 +436,13 @@ struct CaptureFlowView: View {
             ProgressView()
                 .tint(EvolvTheme.accent)
                 .scaleEffect(1.4)
-            Text("Checking Set 1 for comparison evidence…")
+            Text(validationContext?.setNumber == 1
+                 ? "Checking Set 1 for comparison evidence…"
+                 : "Comparing this set with Set 1…")
                 .font(.system(size: 20, weight: .semibold, design: .rounded))
                 .foregroundStyle(EvolvTheme.text)
                 .multilineTextAlignment(.center)
-            Text("Evolv is running the same on-device pose, outline, and region checks used by the final consistency comparison.")
+            Text("Evolv is running the same on-device pose, outline, alignment, and region checks used by the final consistency comparison.")
                 .font(.system(size: 13, design: .rounded))
                 .foregroundStyle(EvolvTheme.textMuted)
                 .multilineTextAlignment(.center)
@@ -454,14 +457,20 @@ struct CaptureFlowView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("SET 1 NEEDS A RETAKE")
+                    Text(validationContext?.setNumber == 1
+                         ? "SET 1 NEEDS A RETAKE"
+                         : "THIS SET NEEDS A TARGETED RETAKE")
                         .font(.system(size: 10, weight: .semibold, design: .rounded))
                         .tracking(1.4)
                         .foregroundStyle(EvolvTheme.accent)
-                    Text("Let's fix the baseline before Set 2")
+                    Text(validationContext?.setNumber == 1
+                         ? "Let's fix the baseline before Set 2"
+                         : "Match Set 1 before continuing")
                         .font(.system(size: 24, weight: .semibold, design: .rounded))
                         .foregroundStyle(EvolvTheme.text)
-                    Text("Your photos are still saved on this iPhone. Evolv could not find all the evidence needed for future comparisons, so only the affected poses need another photo.")
+                    Text(validationContext?.setNumber == 1
+                         ? "Your photos are still saved on this iPhone. Evolv could not find all the evidence needed for future comparisons, so only the affected poses need another photo."
+                         : "Your draft remains saved on this iPhone. Capture quality and comparison quality are separate: these photos were usable, but one or more poses did not match Set 1 closely enough for truthful analysis.")
                         .font(.system(size: 13.5, design: .rounded))
                         .foregroundStyle(EvolvTheme.textMuted)
                         .lineSpacing(3)
@@ -495,6 +504,34 @@ struct CaptureFlowView: View {
                         beginTargetedBaselineRetake(preflight)
                     }
                     .accessibilityIdentifier("validation.baseline.retake")
+                } else if let preflight = repeatPreflight {
+                    ForEach(preflight.actionableDiagnostics) { issue in
+                        GlassCard(padding: 16, cornerRadius: 18) {
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(systemName: issue.kind == .systemError ? "exclamationmark.triangle" : "viewfinder.circle")
+                                    .font(.system(size: 18, weight: .medium))
+                                    .foregroundStyle(issue.kind == .systemError ? EvolvTheme.stable : EvolvTheme.accent)
+                                    .frame(width: 24)
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(issue.userTitle)
+                                        .font(.system(size: 14.5, weight: .semibold, design: .rounded))
+                                        .foregroundStyle(EvolvTheme.text)
+                                    Text(issue.userGuidance)
+                                        .font(.system(size: 12.5, design: .rounded))
+                                        .foregroundStyle(EvolvTheme.textMuted)
+                                        .lineSpacing(2)
+                                }
+                            }
+                        }
+                    }
+
+                    EvolvPrimaryButton(
+                        title: "Retake \(retakePoseList(preflight.posesNeedingRetake))",
+                        icon: "camera.fill"
+                    ) {
+                        beginTargetedRepeatRetake(preflight)
+                    }
+                    .accessibilityIdentifier("validation.repeat.retake")
                 }
 
                 Button("Save draft and exit") {
@@ -737,7 +774,7 @@ struct CaptureFlowView: View {
                 EvolvPrimaryButton(
                     title: usePhotoButtonTitle,
                     icon: isSaving ? nil : "checkmark",
-                    enabled: !isAnalyzing && !isSaving && pendingAssessment != nil
+                    enabled: !isAnalyzing && !isSaving && pendingAssessment?.isAcceptedAtCapture == true
                 ) {
                     Task { await commitPendingCapture() }
                 }
@@ -845,8 +882,14 @@ struct CaptureFlowView: View {
         }
         switch assessment.status {
         case .ready:
+            if assessment.captureAcceptance == .provisional {
+                return "Evolv found a usable body outline and framing, but some pose landmarks were uncertain. Final comparability is checked separately after the set."
+            }
             return "Evolv detected the required pose landmarks. This is a capture aid—not proof that two photos are comparable. Check the photo yourself before continuing."
         case .reviewRecommended:
+            if assessment.captureAcceptance == .rejected {
+                return assessment.automaticStatusDetail
+            }
             if assessment.confirmedIssues.contains(.tooDark) {
                 return "The photo is extremely dark, which can hide body contours. Retaking in more light is recommended."
             }
@@ -855,12 +898,19 @@ struct CaptureFlowView: View {
             }
             return "A specific image issue may limit analysis. Review it carefully before continuing."
         case .unavailable:
-            return "Evolv couldn't confirm the pose landmarks. This is common for side profiles and does not mean the photo is poor. Use the checklist and keep it if the pose is clear."
+            if pendingPose == .side || pendingPose == .sideChest {
+                return "Evolv couldn't confirm the side-pose landmarks. Profile views are harder to detect; use the checklist and keep the photo if the framing and pose are clear."
+            }
+            if pendingPose == .back || pendingPose == .backDoubleBicep {
+                return "Evolv couldn't confirm the back-pose landmarks. This does not mean the photo is poor; use the checklist and keep it if the framing and pose are clear."
+            }
+            return "Evolv couldn't confirm all pose landmarks. This does not mean the photo is poor; use the checklist and keep it if the framing and pose are clear."
         }
     }
 
     private var usePhotoButtonTitle: String {
         if isSaving { return "Saving photo…" }
+        if pendingAssessment?.captureAcceptance == .rejected { return "Retake required" }
         return pendingAssessment?.status == .reviewRecommended ? "Use Photo Anyway" : "Use Photo"
     }
 
@@ -1092,7 +1142,8 @@ struct CaptureFlowView: View {
               let pose = pendingPose,
               let source = pendingSource,
               let pixelSize = pendingPixelSize,
-              var assessment = pendingAssessment else { return }
+              var assessment = pendingAssessment,
+              assessment.isAcceptedAtCapture else { return }
 
         isSaving = true
         if assessment.status == .reviewRecommended {
@@ -1264,19 +1315,33 @@ struct CaptureFlowView: View {
             showLoadError = true
             return
         }
-        if let validationContext, validationContext.setNumber == 1 {
+        if let validationContext {
             phase = .checkingBaseline
             Task { @MainActor in
                 do {
-                    let preflight = try await app.preflightValidationBaseline(
-                        sessionID: validationContext.sessionID,
-                        captures: captures
-                    )
-                    baselinePreflight = preflight
-                    if preflight.isViable {
-                        persistFinalizedCapture()
+                    if validationContext.setNumber == 1 {
+                        let preflight = try await app.preflightValidationBaseline(
+                            sessionID: validationContext.sessionID,
+                            captures: captures
+                        )
+                        baselinePreflight = preflight
+                        if preflight.isViable {
+                            persistFinalizedCapture()
+                        } else {
+                            phase = .baselineBlocked
+                        }
                     } else {
-                        phase = .baselineBlocked
+                        let preflight = try await app.preflightValidationRepeat(
+                            sessionID: validationContext.sessionID,
+                            setNumber: validationContext.setNumber,
+                            captures: captures
+                        )
+                        repeatPreflight = preflight
+                        if preflight.isViable {
+                            persistFinalizedCapture()
+                        } else {
+                            phase = .baselineBlocked
+                        }
                     }
                 } catch {
                     phase = .standard
@@ -1346,6 +1411,33 @@ struct CaptureFlowView: View {
             }
             captures = retained
             baselinePreflight = nil
+            poseIndex = standardPoses.firstIndex(where: failed.contains) ?? 0
+            phase = .standard
+        } catch {
+            loadError = error.localizedDescription
+            showLoadError = true
+        }
+    }
+
+    private func beginTargetedRepeatRetake(_ preflight: ValidationSetPreflight) {
+        guard let validationContext else { return }
+        let failed = Set(preflight.posesNeedingRetake)
+        guard !failed.isEmpty else { return }
+        let removed = captures.filter { failed.contains($0.pose) }
+        let retained = captures.filter { !failed.contains($0.pose) }
+        do {
+            if retained.isEmpty {
+                app.discardValidationDraft(sessionID: validationContext.sessionID)
+            } else {
+                try app.updateValidationDraft(
+                    sessionID: validationContext.sessionID,
+                    setNumber: validationContext.setNumber,
+                    captures: retained
+                )
+                PhotoStore.delete(named: removed.map(\.imageFilename))
+            }
+            captures = retained
+            repeatPreflight = nil
             poseIndex = standardPoses.firstIndex(where: failed.contains) ?? 0
             phase = .standard
         } catch {

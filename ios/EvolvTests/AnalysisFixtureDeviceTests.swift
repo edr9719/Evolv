@@ -247,6 +247,41 @@ final class AnalysisFixtureDeviceTests: XCTestCase {
         ))
     }
 
+    func testMandatoryFixturesPassCaptureAcceptanceAndUnusableInputsFail() async throws {
+        let manifest = try loadManifest()
+        let required = manifest.fixtures.filter { $0.expectedCondition == "valid_mandatory" }
+
+        for fixture in required {
+            let assessment = await QualityGateEngine.assess(
+                image: try image(for: fixture),
+                expectedPose: fixture.pose
+            )
+            XCTAssertTrue(
+                assessment.isAcceptedAtCapture,
+                "\(fixture.pose.rawValue) was rejected at capture: \(assessment.automaticCheckReason ?? "no_reason")"
+            )
+            XCTAssertNotEqual(assessment.captureAcceptance, .rejected)
+        }
+
+        let front = try XCTUnwrap(required.first { $0.pose == .front })
+        let source = try image(for: front)
+        let invalidInputs: [(name: String, image: UIImage)] = [
+            ("crop", try invalidTransform(source, named: "crop")),
+            ("exposure", try invalidTransform(source, named: "exposure"))
+        ]
+        for invalid in invalidInputs {
+            let assessment = await QualityGateEngine.assess(
+                image: invalid.image,
+                expectedPose: .front
+            )
+            XCTAssertEqual(
+                assessment.captureAcceptance,
+                .rejected,
+                "Deliberately unusable \(invalid.name) input passed capture acceptance"
+            )
+        }
+    }
+
     func testPublicMandatoryFixturesPassSetOneDownstreamPreflight() async throws {
         let manifest = try loadManifest()
         let required = manifest.fixtures.filter { $0.expectedCondition == "valid_mandatory" }
@@ -282,9 +317,10 @@ final class AnalysisFixtureDeviceTests: XCTestCase {
         XCTAssertTrue(preflight.isViable, preflight.diagnostics.map(\.id).joined(separator: ", "))
         XCTAssertEqual(Set(preflight.poseEvidence.map(\.pose)), Set(Pose.required))
         XCTAssertTrue(preflight.poseEvidence.allSatisfy { $0.poseExtracted && $0.silhouetteGenerated })
+        XCTAssertEqual(preflight.repeatabilityMetrics?.count, Pose.required.count)
     }
 
-    func testFiveSetConsistencyProtocolWithIdenticalPublicFixtures() async throws {
+    func testFiveSetConsistencyProtocolWithControlledCaptureVariation() async throws {
         let manifest = try loadManifest()
         let required = manifest.fixtures.filter { $0.expectedCondition == "valid_mandatory" }
         let sessionID = UUID()
@@ -300,12 +336,21 @@ final class AnalysisFixtureDeviceTests: XCTestCase {
         var images: [String: UIImage] = [:]
         var scans: [Scan] = []
         var records: [ValidationSetRecord] = []
+        let setTransformations: [Int: String] = [
+            2: "jpeg_0_72",
+            3: "translation_2_percent",
+            4: "rotation_plus_2_degrees",
+            5: "scale_minus_3_percent"
+        ]
 
         for setNumber in 1...ValidationStudySession.requiredSetCount {
             let scanID = UUID()
             let captures = try required.map { fixture -> PoseCapture in
                 let filename = "fixture-set-\(setNumber)-\(fixture.pose.rawValue).jpg"
-                images[filename] = try image(for: fixture)
+                let source = try image(for: fixture)
+                images[filename] = try setTransformations[setNumber].map {
+                    try transform(source, named: $0)
+                } ?? source
                 return PoseCapture(
                     pose: fixture.pose,
                     imageFilename: filename,
@@ -334,6 +379,25 @@ final class AnalysisFixtureDeviceTests: XCTestCase {
                 validationSessionID: sessionID,
                 validationSetNumber: setNumber
             ))
+            let preflight: ValidationSetPreflight?
+            if let anchorCaptures = scans.first?.captures, setNumber > 1 {
+                preflight = await ValidationConsistencyEngine.preflightRepeat(
+                    baselineCaptures: anchorCaptures,
+                    currentCaptures: captures,
+                    setNumber: setNumber,
+                    scanID: sessionID,
+                    loadPhoto: { images[$0] },
+                    now: date
+                )
+                XCTAssertTrue(
+                    preflight?.isViable == true,
+                    "Set \(setNumber) valid variation was blocked: \(preflight?.comparison.failures ?? [:])"
+                )
+                XCTAssertEqual(preflight?.captureIDs, captures.map(\.id))
+                XCTAssertEqual(preflight?.comparison.repeatabilityMetrics?.count, Pose.required.count)
+            } else {
+                preflight = nil
+            }
             records.append(ValidationSetRecord(
                 setNumber: setNumber,
                 scanID: scanID,
@@ -343,7 +407,7 @@ final class AnalysisFixtureDeviceTests: XCTestCase {
                     deviations: [],
                     recordedAt: date
                 ),
-                comparison: nil,
+                comparison: preflight?.comparison,
                 usedExistingCanonicalScan: false
             ))
         }

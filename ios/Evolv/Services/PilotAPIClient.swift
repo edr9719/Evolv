@@ -287,7 +287,11 @@ struct PilotAPIClient {
                     }
                 }
             }
-            throw PilotStudyError.serverRejected(error?.message ?? "The study service rejected this request.")
+            let code = error?.code ?? "service_rejected"
+            throw PilotStudyError.serviceRejected(
+                code: code,
+                message: error?.message ?? "The study service rejected this request."
+            )
         }
         let decoder = JSONDecoder.pilot
         if !explicitSnakeCaseResponse {

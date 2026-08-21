@@ -15,6 +15,7 @@ enum ValidationConsistencyEngine {
         var extractedPoses: [ExtractedPose]
         var profiles: [SilhouetteProfile]
         var cameraMetadata: [Pose: CaptureCameraMetadata]
+        var pixelSizes: [Pose: NormalizedPixelSize]
         var diagnostics: [ValidationPoseDiagnostic]
     }
 
@@ -49,7 +50,8 @@ enum ValidationConsistencyEngine {
                         .map(\.region) ?? []
                 )
             },
-            diagnostics: processed.diagnostics.sorted(by: diagnosticSort)
+            diagnostics: processed.diagnostics.sorted(by: diagnosticSort),
+            repeatabilityMetrics: repeatabilityMetrics(from: processed)
         )
     }
 
@@ -106,26 +108,12 @@ enum ValidationConsistencyEngine {
                 loadPhoto: loadPhoto
             )
             appendRequiredFeatureDiagnostics(to: &current, setNumber: record.setNumber)
-            let comparisons = VisualSignalEngine.comparePair(
-                baselineProfiles: baseline.profiles,
-                currentProfiles: current.profiles,
-                baselineCameraMetadata: baseline.cameraMetadata,
-                currentCameraMetadata: current.cameraMetadata,
-                thresholds: thresholds
-            )
-            let coreRegions: Set<BodyRegion> = [.shoulders, .chest, .waist]
-            let supportedCore = Set(comparisons
-                .filter { $0.status != .unavailable }
-                .map(\.region))
-            let diagnostics = (baseline.diagnostics + current.diagnostics)
-                .sorted(by: diagnosticSort)
-            results[record.setNumber] = ValidationSetComparison(
+            results[record.setNumber] = comparison(
+                baseline: baseline,
+                current: current,
                 setNumber: record.setNumber,
-                regionalComparisons: comparisons,
-                failures: failureMap(for: diagnostics),
-                hasSufficientCoreEvidence: coreRegions.isSubset(of: supportedCore),
-                processingDurationMilliseconds: Int(Date().timeIntervalSince(comparisonStartedAt) * 1_000),
-                diagnostics: diagnostics
+                thresholds: thresholds,
+                processingDurationMilliseconds: Int(Date().timeIntervalSince(comparisonStartedAt) * 1_000)
             )
         }
 
@@ -136,6 +124,51 @@ enum ValidationConsistencyEngine {
             status: status,
             comparisonsBySet: results,
             metadata: metadata
+        )
+    }
+
+    /// Runs the exact downstream anchor-to-repeat path before a repeat set can
+    /// be committed. Capture IDs are part of the returned contract so any
+    /// replacement invalidates this result.
+    static func preflightRepeat(
+        baselineCaptures: [PoseCapture],
+        currentCaptures: [PoseCapture],
+        setNumber: Int,
+        scanID: UUID = UUID(),
+        loadPhoto: @escaping (String) -> UIImage? = { PhotoStore.loadImage(named: $0) },
+        thresholds: AnalysisThresholdSet = .engineeringV1,
+        now: Date = Date()
+    ) async -> ValidationSetPreflight {
+        let startedAt = Date()
+        var baseline = await process(
+            captures: baselineCaptures,
+            scanID: scanID,
+            setNumber: 1,
+            baseline: nil,
+            loadPhoto: loadPhoto
+        )
+        appendRequiredFeatureDiagnostics(to: &baseline, setNumber: 1)
+        var current = await process(
+            captures: currentCaptures,
+            scanID: scanID,
+            setNumber: setNumber,
+            baseline: baseline,
+            loadPhoto: loadPhoto
+        )
+        appendRequiredFeatureDiagnostics(to: &current, setNumber: setNumber)
+        return ValidationSetPreflight(
+            checkedAt: now,
+            setNumber: setNumber,
+            captureIDs: Pose.required.compactMap { pose in
+                currentCaptures.first { $0.pose == pose }?.id
+            },
+            comparison: comparison(
+                baseline: baseline,
+                current: current,
+                setNumber: setNumber,
+                thresholds: thresholds,
+                processingDurationMilliseconds: Int(Date().timeIntervalSince(startedAt) * 1_000)
+            )
         )
     }
 
@@ -215,6 +248,7 @@ enum ValidationConsistencyEngine {
             return (capture.pose, metadata)
         }
         let cameraMetadata = Dictionary(uniqueKeysWithValues: metadataPairs)
+        var pixelSizes: [Pose: NormalizedPixelSize] = [:]
 
         for pose in Pose.required {
             guard let capture = captures.first(where: { $0.pose == pose }) else {
@@ -238,6 +272,9 @@ enum ValidationConsistencyEngine {
                 continue
             }
             let prepared = PhotoStore.prepare(image).image
+            pixelSizes[pose] = capture.normalizedPixelSize ?? prepared.cgImage.map {
+                NormalizedPixelSize(width: $0.width, height: $0.height)
+            }
             do {
                 var bodyPose = try await BodyPoseExtractor.extract(
                     from: prepared,
@@ -277,8 +314,166 @@ enum ValidationConsistencyEngine {
             extractedPoses: extracted,
             profiles: profiles,
             cameraMetadata: cameraMetadata,
+            pixelSizes: pixelSizes,
             diagnostics: diagnostics
         )
+    }
+
+    private static func comparison(
+        baseline: ProcessedScan,
+        current: ProcessedScan,
+        setNumber: Int,
+        thresholds: AnalysisThresholdSet,
+        processingDurationMilliseconds: Int
+    ) -> ValidationSetComparison {
+        let comparisons = VisualSignalEngine.comparePair(
+            baselineProfiles: baseline.profiles,
+            currentProfiles: current.profiles,
+            baselineCameraMetadata: baseline.cameraMetadata,
+            currentCameraMetadata: current.cameraMetadata,
+            thresholds: thresholds
+        )
+        let coreRegions: Set<BodyRegion> = [.shoulders, .chest, .waist]
+        let supportedCore = Set(comparisons
+            .filter { $0.status != .unavailable }
+            .map(\.region))
+        let comparisonDiagnostics = comparabilityDiagnostics(
+            comparisons: comparisons,
+            setNumber: setNumber
+        )
+        let diagnostics = deduplicatedDiagnostics(
+            baseline.diagnostics + current.diagnostics + comparisonDiagnostics
+        ).sorted(by: diagnosticSort)
+        return ValidationSetComparison(
+            setNumber: setNumber,
+            regionalComparisons: comparisons,
+            failures: failureMap(for: diagnostics),
+            hasSufficientCoreEvidence: coreRegions.isSubset(of: supportedCore),
+            processingDurationMilliseconds: processingDurationMilliseconds,
+            diagnostics: diagnostics,
+            repeatabilityMetrics: repeatabilityMetrics(from: current)
+        )
+    }
+
+    private static func comparabilityDiagnostics(
+        comparisons: [RegionalComparison],
+        setNumber: Int
+    ) -> [ValidationPoseDiagnostic] {
+        let coreRegions: Set<BodyRegion> = [.shoulders, .chest, .waist]
+        var diagnostics: [ValidationPoseDiagnostic] = []
+        for comparison in comparisons where coreRegions.contains(comparison.region) {
+            for contribution in comparison.contributions where contribution.status == .unavailable {
+                guard let reason = contribution.reason else { continue }
+                let code: String
+                switch reason {
+                case "pose_not_comparable":
+                    code = contribution.pose == .side
+                        ? "side_angle_differs_from_baseline"
+                        : "pose_alignment_differs_from_baseline"
+                case "camera_configuration_changed", "camera_configuration_unknown":
+                    code = "camera_configuration_changed"
+                case "pose_match_unavailable":
+                    code = "pose_alignment_unavailable"
+                default:
+                    continue
+                }
+                diagnostics.append(diagnostic(
+                    setNumber: setNumber,
+                    pose: contribution.pose,
+                    stage: .comparability,
+                    kind: .comparabilityChange,
+                    code: code,
+                    affectedRegions: [comparison.region]
+                ))
+            }
+            if comparison.reason == "cross_pose_conflict" {
+                for contribution in comparison.contributions where contribution.status == .supported {
+                    diagnostics.append(diagnostic(
+                        setNumber: setNumber,
+                        pose: contribution.pose,
+                        stage: .comparability,
+                        kind: .comparabilityChange,
+                        code: "cross_pose_evidence_conflict",
+                        affectedRegions: [comparison.region]
+                    ))
+                }
+            }
+        }
+        return diagnostics
+    }
+
+    private static func deduplicatedDiagnostics(
+        _ diagnostics: [ValidationPoseDiagnostic]
+    ) -> [ValidationPoseDiagnostic] {
+        var seen = Set<String>()
+        return diagnostics.filter { seen.insert($0.id).inserted }
+    }
+
+    private static func repeatabilityMetrics(
+        from processed: ProcessedScan
+    ) -> [ValidationRepeatabilityMetrics] {
+        Pose.required.compactMap { pose -> ValidationRepeatabilityMetrics? in
+            guard let extracted = processed.extractedPoses.first(where: { $0.pose == pose }) else { return nil }
+            let profile = processed.profiles.first(where: { $0.pose == pose })
+            let validLandmarks = extracted.landmarks.filter {
+                $0.confidence >= (pose == .side ? 0.20 : 0.30)
+            }
+            let centerX = validLandmarks.isEmpty
+                ? nil
+                : validLandmarks.map(\.x).reduce(0, +) / Float(validLandmarks.count) - 0.5
+            let centerY = validLandmarks.isEmpty
+                ? nil
+                : validLandmarks.map(\.y).reduce(0, +) / Float(validLandmarks.count) - 0.5
+            let margin = validLandmarks.flatMap { [$0.x, $0.y, 1 - $0.x, 1 - $0.y] }.min()
+            let size = processed.pixelSizes[pose]
+            let scale: Float?
+            if let reference = profile?.torsoReferencePixels, let size {
+                scale = reference / Float(max(size.width, size.height))
+            } else {
+                scale = nil
+            }
+            return ValidationRepeatabilityMetrics(
+                pose: pose,
+                normalizedFeatureValues: Dictionary(uniqueKeysWithValues:
+                    (profile?.regionFeatures ?? []).compactMap { feature in
+                        guard feature.evidenceReason == nil else { return nil }
+                        return (feature.region, feature.normalizedValue)
+                    }
+                ),
+                normalizedTorsoScale: scale,
+                subjectCenterOffsetX: centerX,
+                subjectCenterOffsetY: centerY,
+                minimumObservedMargin: margin,
+                torsoRotationDegrees: torsoRotationDegrees(extracted),
+                poseMatchScore: extracted.poseMatchScore
+            )
+        }
+    }
+
+    private static func torsoRotationDegrees(_ pose: ExtractedPose) -> Float? {
+        let shoulder: (Float, Float)?
+        let hip: (Float, Float)?
+        if pose.pose == .side {
+            let candidates = ["left", "right"].compactMap { side -> (Float, Float, Float, Float, Float)? in
+                guard let shoulder = pose.landmark("\(side)Shoulder"),
+                      let hip = pose.landmark("\(side)Hip"),
+                      shoulder.confidence >= 0.20, hip.confidence >= 0.20 else { return nil }
+                return (shoulder.x, shoulder.y, hip.x, hip.y, min(shoulder.confidence, hip.confidence))
+            }
+            guard let best = candidates.max(by: { $0.4 < $1.4 }) else { return nil }
+            shoulder = (best.0, best.1)
+            hip = (best.2, best.3)
+        } else {
+            guard let ls = pose.landmark("leftShoulder"), let rs = pose.landmark("rightShoulder"),
+                  let lh = pose.landmark("leftHip"), let rh = pose.landmark("rightHip") else { return nil }
+            shoulder = ((ls.x + rs.x) / 2, (ls.y + rs.y) / 2)
+            hip = ((lh.x + rh.x) / 2, (lh.y + rh.y) / 2)
+        }
+        guard let shoulder, let hip else { return nil }
+        let dx = hip.0 - shoulder.0
+        let dy = hip.1 - shoulder.1
+        guard abs(dx) + abs(dy) > 0.001 else { return nil }
+        return atan2(dx, dy) * 180 / .pi
     }
 
     private static func appendRequiredFeatureDiagnostics(

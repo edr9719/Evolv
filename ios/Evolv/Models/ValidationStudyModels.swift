@@ -24,6 +24,7 @@ enum ValidationStudyError: LocalizedError {
     case sessionIneligible(ValidationDeviationReason)
     case invalidCameraConfiguration
     case baselineEvidenceRequired
+    case repeatEvidenceRequired
     case conditionsRequired
 
     var errorDescription: String? {
@@ -42,6 +43,8 @@ enum ValidationStudyError: LocalizedError {
             return "This set did not use the camera and lens locked for the test. The saved draft remains available."
         case .baselineEvidenceRequired:
             return "Set 1 must pass Evolv's comparison-evidence check before the test can continue. Retake the requested pose and try again."
+        case .repeatEvidenceRequired:
+            return "This set must pass Evolv's Set 1 comparability check before the test can continue. Retake only the requested pose and try again."
         case .conditionsRequired:
             return "Answer the conditions question for the saved set before continuing."
         }
@@ -88,7 +91,7 @@ enum ValidationConsistencyStatus: String, Codable, Hashable {
     var detail: String {
         switch self {
         case .consistent:
-            return "Evolv found no unexpected visual change across the four same-session comparisons."
+            return "Evolv found no unexpected visual change in the supported shoulder, upper-torso, and waist comparisons. Arm evidence is reported only when it can be isolated reliably."
         case .limitedEvidence:
             return "Some photos could not be analyzed reliably. Evolv left those comparisons unavailable instead of guessing."
         case .needsReview:
@@ -189,6 +192,16 @@ struct ValidationPoseDiagnostic: Codable, Hashable, Identifiable {
                 return "\(pose.shortLabel) arms weren't clear enough"
             }
             return "\(pose.shortLabel) comparison evidence was incomplete"
+        case "side_angle_differs_from_baseline":
+            return "Side angle differs from Set 1"
+        case "pose_alignment_differs_from_baseline":
+            return "\(pose.shortLabel) alignment differs from Set 1"
+        case "pose_alignment_unavailable":
+            return "\(pose.shortLabel) alignment couldn't be compared"
+        case "camera_configuration_changed":
+            return "Camera setup changed"
+        case "cross_pose_evidence_conflict":
+            return "\(pose.shortLabel) conflicts with the other angles"
         case "photo_load_failed", "image_decode_failed":
             return "\(pose.shortLabel) photo couldn't be opened"
         default:
@@ -215,6 +228,16 @@ struct ValidationPoseDiagnostic: Codable, Hashable, Identifiable {
                 return "Let your arms hang naturally with visible space between each arm and your torso."
             }
             return "Match the guide, keep your hips and upper legs visible, and avoid connected shadows."
+        case "side_angle_differs_from_baseline":
+            return "Match Set 1's profile angle. Keep the same shoulder, hip, and arm alignment instead of turning farther toward or away from the camera."
+        case "pose_alignment_differs_from_baseline":
+            return "Use the Set 1 ghost overlay and match your shoulder, hip, and relaxed-arm position more closely."
+        case "pose_alignment_unavailable":
+            return "Keep the complete torso, hip region, and relaxed arm visible so Evolv can compare alignment with Set 1."
+        case "camera_configuration_changed":
+            return "Use the camera and lens locked at the start of this consistency test."
+        case "cross_pose_evidence_conflict":
+            return "Match Set 1's distance and stance. Keep your torso centered and your arms in the same relaxed position."
         case "photo_load_failed", "image_decode_failed":
             return "Retake this pose so Evolv can save and inspect a fresh photo."
         default:
@@ -239,10 +262,70 @@ struct ValidationBaselinePreflight: Codable, Hashable {
     var captureIDs: [UUID]
     var poseEvidence: [ValidationPoseEvidence]
     var diagnostics: [ValidationPoseDiagnostic]
+    /// Build 20 adds the same privacy-safe geometry/feature summaries used for
+    /// repeats so empirical noise can be measured relative to Set 1.
+    var repeatabilityMetrics: [ValidationRepeatabilityMetrics]? = nil
 
     var isViable: Bool { diagnostics.isEmpty }
     var posesNeedingRetake: [Pose] {
         Pose.required.filter { pose in diagnostics.contains { $0.pose == pose } }
+    }
+
+    func matches(_ captures: [PoseCapture]) -> Bool {
+        Set(captureIDs) == Set(captures.map(\.id))
+    }
+}
+
+/// Privacy-safe summaries used to study repeatability. These values describe
+/// capture geometry and normalized feature output; they contain no landmark
+/// coordinates, masks, filenames, or body descriptions and are not included
+/// in the pilot network payload.
+struct ValidationRepeatabilityMetrics: Codable, Hashable, Identifiable {
+    var pose: Pose
+    var normalizedFeatureValues: [BodyRegion: Float]
+    var normalizedTorsoScale: Float?
+    var subjectCenterOffsetX: Float?
+    var subjectCenterOffsetY: Float?
+    var minimumObservedMargin: Float?
+    var torsoRotationDegrees: Float?
+    var poseMatchScore: Float?
+
+    var id: Pose { pose }
+}
+
+/// Strict Layer-B check for a repeat set. Exact capture IDs prevent a replaced
+/// image from inheriting a successful comparison.
+struct ValidationSetPreflight: Codable, Hashable {
+    var checkedAt: Date
+    var setNumber: Int
+    var captureIDs: [UUID]
+    var comparison: ValidationSetComparison
+
+    var isViable: Bool { comparison.hasSufficientCoreEvidence }
+    var actionableDiagnostics: [ValidationPoseDiagnostic] {
+        let priority: (ValidationPoseDiagnostic) -> Int = { issue in
+            switch issue.code {
+            case "side_angle_differs_from_baseline", "pose_alignment_differs_from_baseline": return 0
+            case "hip_landmarks_unavailable", "shoulder_landmarks_unavailable": return 1
+            case "cross_pose_evidence_conflict": return 2
+            case "person_segmentation_unavailable", "silhouette_evidence_unavailable": return 3
+            default: return issue.kind == .systemError ? 0 : 4
+            }
+        }
+        return Pose.required.compactMap { pose in
+            (comparison.diagnostics ?? [])
+                .filter { $0.setNumber == setNumber && $0.pose == pose }
+                .min { priority($0) < priority($1) }
+        }
+    }
+    var posesNeedingRetake: [Pose] {
+        let diagnostics = comparison.diagnostics ?? []
+        return Pose.required.filter { pose in
+            diagnostics.contains { $0.setNumber == setNumber && $0.pose == pose }
+                || comparison.regionalComparisons.flatMap(\.contributions).contains {
+                    $0.pose == pose && $0.status == .unavailable
+                }
+        }
     }
 
     func matches(_ captures: [PoseCapture]) -> Bool {
@@ -259,6 +342,9 @@ struct ValidationSetComparison: Codable, Hashable {
     /// Optional so Build 17 records remain decodable. New evaluations always
     /// write stage-specific diagnostics with baseline/repeat provenance.
     var diagnostics: [ValidationPoseDiagnostic]? = nil
+    /// Optional for backward compatibility; Build 20 writes these summaries
+    /// for repeatability calibration without uploading them.
+    var repeatabilityMetrics: [ValidationRepeatabilityMetrics]? = nil
 }
 
 struct ValidationSetRecord: Identifiable, Codable, Hashable {
@@ -308,6 +394,9 @@ struct ValidationStudySession: Identifiable, Codable, Hashable {
     /// every newly created Build 18 session requires a viable Set 1.
     var baselinePreflightRequired: Bool? = nil
     var baselinePreflight: ValidationBaselinePreflight? = nil
+    /// A strict comparison of the current draft repeat against Set 1. It is
+    /// cleared whenever any draft capture changes.
+    var draftSetPreflight: ValidationSetPreflight? = nil
 
     var completedSetCount: Int { sets.count }
     var nextSetNumber: Int { min(Self.requiredSetCount, sets.count + 1) }
@@ -367,6 +456,18 @@ enum ValidationStudyPolicy {
         guard session.requiresBaselinePreflight else { return true }
         guard let preflight = session.baselinePreflight, preflight.isViable else { return false }
         return setNumber != 1 || preflight.matches(captures)
+    }
+
+    static func hasRequiredRepeatEvidence(
+        session: ValidationStudySession,
+        committingSetNumber setNumber: Int,
+        captures: [PoseCapture]
+    ) -> Bool {
+        guard setNumber > 1,
+              let preflight = session.draftSetPreflight else { return false }
+        return preflight.setNumber == setNumber
+            && preflight.matches(captures)
+            && preflight.isViable
     }
 
     static func isValidDraft(

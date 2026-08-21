@@ -233,6 +233,170 @@ final class ValidationStudyTests: XCTestCase {
         ))
     }
 
+    func testRepeatRequiresExactViablePreflightAndReplacementInvalidatesIt() {
+        let captures = requiredCaptures(position: .front, lens: "wide")
+        let stable = RegionalComparison(
+            region: .waist,
+            status: .stable,
+            normalizedDelta: 0,
+            contributions: [],
+            reason: nil
+        )
+        let checked = ValidationSetPreflight(
+            checkedAt: referenceDate,
+            setNumber: 2,
+            captureIDs: captures.map(\.id),
+            comparison: ValidationSetComparison(
+                setNumber: 2,
+                regionalComparisons: [stable],
+                failures: [:],
+                hasSufficientCoreEvidence: true
+            )
+        )
+        var session = studySession(setCount: 1)
+        session.draftSetNumber = 2
+        session.draftCaptures = captures
+        session.draftSetPreflight = checked
+
+        XCTAssertTrue(ValidationStudyPolicy.hasRequiredRepeatEvidence(
+            session: session,
+            committingSetNumber: 2,
+            captures: captures
+        ))
+
+        var replaced = captures
+        replaced[2] = capture(.back, position: .front, lens: "wide")
+        XCTAssertFalse(ValidationStudyPolicy.hasRequiredRepeatEvidence(
+            session: session,
+            committingSetNumber: 2,
+            captures: replaced
+        ))
+    }
+
+    func testSidePoseDriftBlocksRepeatAndTargetsOnlySide() {
+        let baseline = requiredProfiles(match: nil)
+        var current = requiredProfiles(match: 0.99)
+        current[current.firstIndex { $0.pose == .side }!].poseMatchScore = 0.70
+        let comparisons = VisualSignalEngine.comparePair(
+            baselineProfiles: baseline,
+            currentProfiles: current
+        )
+        let diagnostic = ValidationPoseDiagnostic(
+            setNumber: 2,
+            pose: .side,
+            stage: .comparability,
+            kind: .comparabilityChange,
+            code: "side_angle_differs_from_baseline",
+            affectedRegions: [.chest, .waist]
+        )
+        let preflight = ValidationSetPreflight(
+            checkedAt: referenceDate,
+            setNumber: 2,
+            captureIDs: requiredCaptures(position: .front, lens: "wide").map(\.id),
+            comparison: ValidationSetComparison(
+                setNumber: 2,
+                regionalComparisons: comparisons,
+                failures: ["set_2.side.comparability": diagnostic.code],
+                hasSufficientCoreEvidence: false,
+                diagnostics: [diagnostic]
+            )
+        )
+
+        XCTAssertFalse(preflight.isViable)
+        XCTAssertEqual(preflight.posesNeedingRetake, [.side])
+        XCTAssertEqual(diagnostic.userTitle, "Side angle differs from Set 1")
+        XCTAssertTrue(diagnostic.userGuidance.contains("profile angle"))
+        XCTAssertTrue(comparisons.filter { [.chest, .waist].contains($0.region) }
+            .allSatisfy { $0.status == .unavailable })
+    }
+
+    func testRepeatLosingBackHipsBlocksWithoutManufacturingStableShoulders() {
+        let front = PoseContribution(
+            pose: .front,
+            baselineValue: 0.5,
+            currentValue: 0.5,
+            normalizedDelta: 0,
+            poseMatchScore: 0.99,
+            status: .supported,
+            reason: nil
+        )
+        let back = PoseContribution(
+            pose: .back,
+            baselineValue: 0.5,
+            currentValue: nil,
+            normalizedDelta: nil,
+            poseMatchScore: nil,
+            status: .unavailable,
+            reason: "current_feature_unavailable"
+        )
+        let shoulders = RegionalComparison(
+            region: .shoulders,
+            status: .unavailable,
+            normalizedDelta: nil,
+            contributions: [front, back],
+            reason: "required_pose_evidence_unavailable"
+        )
+        let issue = diagnostic(set: 2, pose: .back, stage: .hipLandmarks, code: "hip_landmarks_unavailable")
+        let preflight = ValidationSetPreflight(
+            checkedAt: referenceDate,
+            setNumber: 2,
+            captureIDs: requiredCaptures(position: .front, lens: "wide").map(\.id),
+            comparison: ValidationSetComparison(
+                setNumber: 2,
+                regionalComparisons: [shoulders],
+                failures: ["set_2.back.hipLandmarks": issue.code],
+                hasSufficientCoreEvidence: false,
+                diagnostics: [issue]
+            )
+        )
+
+        XCTAssertFalse(preflight.isViable)
+        XCTAssertEqual(preflight.posesNeedingRetake, [.back])
+        XCTAssertNil(shoulders.normalizedDelta)
+    }
+
+    func testCrossPoseConflictBlocksAndTargetsContributingPoses() {
+        let issueFront = ValidationPoseDiagnostic(
+            setNumber: 3,
+            pose: .front,
+            stage: .comparability,
+            kind: .comparabilityChange,
+            code: "cross_pose_evidence_conflict",
+            affectedRegions: [.waist]
+        )
+        let issueSide = ValidationPoseDiagnostic(
+            setNumber: 3,
+            pose: .side,
+            stage: .comparability,
+            kind: .comparabilityChange,
+            code: "cross_pose_evidence_conflict",
+            affectedRegions: [.waist]
+        )
+        let conflict = RegionalComparison(
+            region: .waist,
+            status: .unavailable,
+            normalizedDelta: nil,
+            contributions: [],
+            reason: "cross_pose_conflict"
+        )
+        let preflight = ValidationSetPreflight(
+            checkedAt: referenceDate,
+            setNumber: 3,
+            captureIDs: requiredCaptures(position: .front, lens: "wide").map(\.id),
+            comparison: ValidationSetComparison(
+                setNumber: 3,
+                regionalComparisons: [conflict],
+                failures: [:],
+                hasSufficientCoreEvidence: false,
+                diagnostics: [issueFront, issueSide]
+            )
+        )
+
+        XCTAssertFalse(preflight.isViable)
+        XCTAssertEqual(preflight.posesNeedingRetake, [.front, .side])
+        XCTAssertNil(conflict.normalizedDelta)
+    }
+
     func testBaselineFeatureRequirementsReuseComparisonContract() {
         var profiles = requiredProfiles(match: nil)
         let frontIndex = profiles.firstIndex { $0.pose == .front }!

@@ -103,6 +103,43 @@ final class PilotSharingTests: XCTestCase {
         }
     }
 
+    func testFullFiveSetPayloadPreservesPrivacySafeLandmarkFailureLabels() throws {
+        var session = completedSession()
+        for index in session.sets.indices where session.sets[index].setNumber > 1 {
+            let number = session.sets[index].setNumber
+            session.sets[index].comparison = ValidationSetComparison(
+                setNumber: number,
+                regionalComparisons: [RegionalComparison(
+                    region: .waist,
+                    status: .unavailable,
+                    normalizedDelta: nil,
+                    contributions: [],
+                    reason: "required_pose_evidence_unavailable"
+                )],
+                failures: [
+                    "set_\(number).back.hipLandmarks": "hip_landmarks_unavailable",
+                    "set_\(number).side.comparability": "pose_not_comparable"
+                ],
+                hasSufficientCoreEvidence: false
+            )
+        }
+
+        let payload = try PilotResultsBuilder.make(session: session, scans: [])
+        let encoder = JSONEncoder.pilot
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let data = try encoder.encode(payload)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let sets = try XCTUnwrap(object["sets"] as? [[String: Any]])
+        let text = try XCTUnwrap(String(data: data, encoding: .utf8))
+
+        XCTAssertEqual(sets.count, 5)
+        XCTAssertTrue(text.contains("hip_landmarks_unavailable"))
+        XCTAssertTrue(text.contains("set_2.back.hipLandmarks"))
+        XCTAssertFalse(text.contains("imageFilename"))
+        XCTAssertFalse(text.contains("landmark_coordinates"))
+        XCTAssertFalse(text.contains("person_mask"))
+    }
+
     func testSignedUploadUsesPUTAndCiphertextContentType() async throws {
         let spy = PilotTransportSpy()
         let client = PilotAPIClient(
@@ -229,6 +266,34 @@ final class PilotSharingTests: XCTestCase {
             XCTFail("A full cohort should reject enrollment")
         } catch {
             XCTAssertEqual(error as? PilotStudyError, .pilotFull)
+        }
+    }
+
+    @MainActor
+    func testSubmissionServiceErrorPreservesBackendReasonCode() async {
+        let spy = PilotJSONTransportSpy(
+            responseBody: #"{"code":"forbidden_results_field","message":"The pilot request could not be completed."}"#,
+            statusCode: 400
+        )
+        let client = PilotAPIClient(
+            transport: spy,
+            baseURL: URL(string: "https://example.test/functions/v1/pilot-api")!,
+            publishableKey: "public-test-key",
+            networkAllowed: true
+        )
+
+        do {
+            _ = try await client.status(participantToken: "opaque-participant-token")
+            XCTFail("The service rejection should be surfaced")
+        } catch let error as PilotStudyError {
+            guard case .serviceRejected(let code, let message) = error else {
+                return XCTFail("Expected a code-preserving service rejection")
+            }
+            XCTAssertEqual(code, "forbidden_results_field")
+            XCTAssertEqual(message, "The pilot request could not be completed.")
+            XCTAssertEqual(PilotSubmissionCoordinator.reasonCode(for: error), code)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
         }
     }
 

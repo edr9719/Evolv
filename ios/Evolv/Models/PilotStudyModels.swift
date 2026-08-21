@@ -460,6 +460,7 @@ enum PilotStudyError: LocalizedError, Equatable {
     case payloadRejected
     case uploadFailed
     case serverRejected(String)
+    case serviceRejected(code: String, message: String)
     case storageFailed
 
     var errorDescription: String? {
@@ -487,6 +488,7 @@ enum PilotStudyError: LocalizedError, Equatable {
         case .payloadRejected: return "The study service rejected the results package. Nothing new was shared."
         case .uploadFailed: return "The secure upload did not finish. Evolv kept an encrypted retry package on this iPhone."
         case .serverRejected(let message): return message
+        case .serviceRejected(_, let message): return message
         case .storageFailed: return "Evolv could not securely save the pending submission on this iPhone."
         }
     }

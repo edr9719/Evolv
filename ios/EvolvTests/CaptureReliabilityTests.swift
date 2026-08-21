@@ -51,6 +51,79 @@ final class CaptureReliabilityTests: XCTestCase {
         XCTAssertFalse(side.confirmedIssues.contains(.poseMismatch))
     }
 
+    func testWeakLandmarksWithStrongSilhouetteAndFramingAreProvisionallyAccepted() {
+        let result = CaptureAcceptancePolicy.evaluate(CaptureAcceptanceSignals(
+            poseSpecificTorsoVerified: false,
+            silhouetteFrame: NormalizedCaptureFrame(minX: 0.25, minY: 0.08, maxX: 0.75, maxY: 1),
+            orientationClearlyWrong: false,
+            confirmedExposureIssues: []
+        ))
+
+        XCTAssertEqual(result.status, .provisional)
+        XCTAssertNil(result.issue)
+        XCTAssertEqual(result.reasonCode, "silhouette_framing_only")
+    }
+
+    func testClearlyBadCaptureIsRejectedEvenWhenLandmarksExist() {
+        let cropped = CaptureAcceptancePolicy.evaluate(CaptureAcceptanceSignals(
+            poseSpecificTorsoVerified: true,
+            silhouetteFrame: NormalizedCaptureFrame(minX: 0, minY: 0.05, maxX: 0.8, maxY: 1),
+            orientationClearlyWrong: false,
+            confirmedExposureIssues: []
+        ))
+        let wrongOrientation = CaptureAcceptancePolicy.evaluate(CaptureAcceptanceSignals(
+            poseSpecificTorsoVerified: true,
+            silhouetteFrame: NormalizedCaptureFrame(minX: 0.2, minY: 0.05, maxX: 0.8, maxY: 1),
+            orientationClearlyWrong: true,
+            confirmedExposureIssues: []
+        ))
+
+        XCTAssertEqual(cropped.status, .rejected)
+        XCTAssertEqual(cropped.issue, .bodyNotFramed)
+        XCTAssertEqual(wrongOrientation.status, .rejected)
+        XCTAssertEqual(wrongOrientation.issue, .poseMismatch)
+    }
+
+    func testDetectorTimeoutRemainsManuallyUsableRatherThanHardRejected() async {
+        let image = solidImage(size: CGSize(width: 100, height: 200), color: .gray)
+        let assessment = await QualityGateEngine.assessWithTimeout(
+            image: image,
+            expectedPose: .back,
+            seconds: 0
+        )
+
+        XCTAssertTrue(assessment.isAcceptedAtCapture)
+        XCTAssertEqual(assessment.captureAcceptance, .provisional)
+    }
+
+    func testDetachedEdgeNoiseDoesNotTurnPersonFrameIntoCropFailure() throws {
+        let width = 100
+        let height = 100
+        var pixels = [UInt8](repeating: 0, count: width * height)
+        for y in 5..<100 {
+            for x in 30..<70 {
+                pixels[y * width + x] = 255
+            }
+        }
+        // Simulates a disconnected shadow/segmentation speck at the edge.
+        pixels[50 * width] = 255
+        let frame = try XCTUnwrap(QualityGateEngine.captureFrame(from: BinaryPersonMask(
+            width: width,
+            height: height,
+            pixels: pixels
+        )))
+
+        XCTAssertEqual(frame.minX, 30.0 / 99.0, accuracy: 0.0001)
+        XCTAssertGreaterThan(frame.minY, 0.01)
+        XCTAssertLessThan(frame.maxX, 0.995)
+        XCTAssertNotEqual(CaptureAcceptancePolicy.evaluate(CaptureAcceptanceSignals(
+            poseSpecificTorsoVerified: false,
+            silhouetteFrame: frame,
+            orientationClearlyWrong: false,
+            confirmedExposureIssues: []
+        )).status, .rejected)
+    }
+
     func testAtomicSaveReportsWriteFailure() async throws {
         let image = solidImage(size: CGSize(width: 20, height: 20), color: .green)
         let fileURL = FileManager.default.temporaryDirectory

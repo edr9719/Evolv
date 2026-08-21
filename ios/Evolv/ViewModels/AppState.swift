@@ -886,6 +886,9 @@ final class AppState {
         var candidate = validationSessions
         candidate[index].draftSetNumber = setNumber
         candidate[index].draftCaptures = captures
+        if candidate[index].draftSetPreflight?.matches(captures) != true {
+            candidate[index].draftSetPreflight = nil
+        }
         if setNumber == 1,
            candidate[index].baselinePreflight?.matches(captures) != true {
             candidate[index].baselinePreflight = nil
@@ -900,6 +903,7 @@ final class AppState {
         var candidate = validationSessions
         candidate[index].draftSetNumber = nil
         candidate[index].draftCaptures = []
+        candidate[index].draftSetPreflight = nil
         if candidate[index].nextSetNumber == 1 {
             candidate[index].baselinePreflight = nil
         }
@@ -949,6 +953,53 @@ final class AppState {
         return preflight
     }
 
+    /// Strictly compares a repeat draft with the exact Set 1 anchor before the
+    /// set can be committed. The saved result is invalidated by any capture-ID
+    /// change in updateValidationDraft.
+    func preflightValidationRepeat(
+        sessionID: UUID,
+        setNumber: Int,
+        captures: [PoseCapture],
+        now: Date = Date()
+    ) async throws -> ValidationSetPreflight {
+        refreshValidationSessionEligibility(now: now)
+        guard setNumber > 1,
+              let initialIndex = validationSessions.firstIndex(where: { $0.id == sessionID }),
+              validationSessions[initialIndex].status == .active,
+              validationSessions[initialIndex].nextSetNumber == setNumber,
+              let anchorID = validationSessions[initialIndex].anchorScanID,
+              let anchor = scan(id: anchorID),
+              ValidationStudyPolicy.isValidCompletedSet(
+                captures,
+                position: validationSessions[initialIndex].lockedCameraPosition,
+                lockedLensType: validationSessions[initialIndex].lockedLensType
+              ) else {
+            throw ValidationStudyError.invalidCameraConfiguration
+        }
+
+        let preflight = await ValidationConsistencyEngine.preflightRepeat(
+            baselineCaptures: anchor.captures,
+            currentCaptures: captures,
+            setNumber: setNumber,
+            scanID: sessionID,
+            now: now
+        )
+
+        refreshValidationSessionEligibility(now: now)
+        guard let freshIndex = validationSessions.firstIndex(where: { $0.id == sessionID }),
+              validationSessions[freshIndex].status == .active,
+              validationSessions[freshIndex].nextSetNumber == setNumber,
+              validationSessions[freshIndex].draftSetNumber == setNumber,
+              Set(validationSessions[freshIndex].draftCaptures.map(\.id)) == Set(captures.map(\.id)) else {
+            throw ValidationStudyError.sessionUnavailable
+        }
+        var candidate = validationSessions
+        candidate[freshIndex].draftSetPreflight = preflight
+        try ValidationStudyStore.save(candidate)
+        validationSessions = candidate
+        return preflight
+    }
+
     @discardableResult
     func addValidationSet(
         sessionID: UUID,
@@ -984,6 +1035,19 @@ final class AppState {
         ) else {
             throw ValidationStudyError.baselineEvidenceRequired
         }
+        let repeatPreflight: ValidationSetPreflight?
+        if setNumber > 1 {
+            guard ValidationStudyPolicy.hasRequiredRepeatEvidence(
+                session: session,
+                committingSetNumber: setNumber,
+                captures: captures
+            ), let checked = session.draftSetPreflight else {
+                throw ValidationStudyError.repeatEvidenceRequired
+            }
+            repeatPreflight = checked
+        } else {
+            repeatPreflight = nil
+        }
 
         let role: ScanRole
         if setNumber == 1 {
@@ -1015,12 +1079,13 @@ final class AppState {
         session.lockedLensType = configuration.lensType
         session.draftSetNumber = nil
         session.draftCaptures = []
+        session.draftSetPreflight = nil
         session.sets.append(ValidationSetRecord(
             setNumber: setNumber,
             scanID: scan.id,
             completedAt: now,
             conditions: nil,
-            comparison: nil,
+            comparison: repeatPreflight?.comparison,
             usedExistingCanonicalScan: false
         ))
         var candidateSessions = validationSessions

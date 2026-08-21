@@ -198,6 +198,71 @@ export function validateResultsPayload(
     "measurement",
     "tape",
   ];
+
+  // These dictionaries contain privacy-safe diagnostic labels, not schema
+  // fields. Dynamic labels such as `set_2.back.hipLandmarks` must not be
+  // mistaken for raw landmark data, while arbitrary values, paths, filenames,
+  // coordinates, masks, or nested objects must still fail closed.
+  const validateReasonCodeMap = (value: unknown): void => {
+    if (!value || Array.isArray(value) || typeof value !== "object") {
+      throw new Error("invalid_results");
+    }
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (entries.length > 80) throw new Error("invalid_results");
+    const consistencyLabel =
+      /^set_[1-5]\.(front|side|back)\.(photoLoading|poseExtraction|hipLandmarks|segmentation|silhouette|regionFeatures|comparability)$/;
+    const progressLabel =
+      /^(front|side|back|frontDoubleBicep|sideChest|backDoubleBicep|mostMuscular|relaxedAesthetic|legs)(_silhouette)?$/;
+    const allowedReasons = new Set([
+      "photo_load_failed",
+      "image_decode_failed",
+      "hip_landmarks_unavailable",
+      "shoulder_landmarks_unavailable",
+      "body_pose_unavailable",
+      "person_segmentation_unavailable",
+      "torso_scale_unavailable",
+      "silhouette_evidence_unavailable",
+      "required_region_feature_unavailable",
+      "unexpected_pose_processing_error",
+      "unexpected_silhouette_processing_error",
+      "side_angle_differs_from_baseline",
+      "pose_alignment_differs_from_baseline",
+      "pose_alignment_unavailable",
+      "camera_configuration_changed",
+      "cross_pose_evidence_conflict",
+      "pose_not_comparable",
+      "camera_configuration_unknown",
+      "no_supported_regions",
+      "noImage",
+      "noSegmentation",
+      "noObservation",
+      "hipsUnavailable",
+      "shouldersUnavailable",
+      "insufficientLandmarks",
+      "invalidReferenceScale",
+      "insufficientEvidence",
+    ]);
+    for (const [label, reason] of entries) {
+      const lowerLabel = label.toLowerCase();
+      const lowerReason = typeof reason === "string"
+        ? reason.toLowerCase()
+        : "";
+      if (
+        lowerLabel.includes("filename") || lowerLabel.includes("mask") ||
+        lowerReason.includes("filename") || lowerReason.includes("mask")
+      ) {
+        throw new Error("forbidden_results_field");
+      }
+      if (
+        label.length < 1 || label.length > 160 ||
+        (!consistencyLabel.test(label) && !progressLabel.test(label)) ||
+        typeof reason !== "string" || reason.length < 1 ||
+        reason.length > 100 || !allowedReasons.has(reason)
+      ) {
+        throw new Error("invalid_results");
+      }
+    }
+  };
   const walk = (value: unknown): void => {
     if (Array.isArray(value)) return value.forEach(walk);
     if (!value || typeof value !== "object") return;
@@ -205,6 +270,10 @@ export function validateResultsPayload(
       const [key, child] of Object.entries(value as Record<string, unknown>)
     ) {
       const lower = key.toLowerCase();
+      if (lower === "failure_reason_codes_by_pose") {
+        validateReasonCodeMap(child);
+        continue;
+      }
       if (forbidden.some((term) => lower.includes(term))) {
         throw new Error(
           "forbidden_results_field",

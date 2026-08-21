@@ -479,6 +479,15 @@ enum CaptureVerificationStatus: String, Codable, Hashable {
     }
 }
 
+/// Layer-A disposition for the photo itself. This is intentionally separate
+/// from downstream analytical comparability: an accepted/provisional capture
+/// may still be excluded from a body-change comparison.
+enum CaptureAcceptanceStatus: String, Codable, Hashable {
+    case accepted
+    case provisional
+    case rejected
+}
+
 enum CaptureRegion: String, Codable, CaseIterable, Hashable {
     case shoulders
     case chest
@@ -521,6 +530,12 @@ struct CaptureAssessment: Codable, Hashable {
     /// A privacy-safe reason code for an unavailable automatic check. Optional
     /// so assessments saved by earlier builds remain decodable.
     var automaticCheckReason: String? = nil
+    /// Optional so every pre-Build-20 capture remains decodable. A missing
+    /// value means the older review-only policy was used, not that the image
+    /// failed capture acceptance.
+    var captureAcceptance: CaptureAcceptanceStatus? = nil
+
+    var isAcceptedAtCapture: Bool { captureAcceptance != .rejected }
 
     var hasSupportedUpperBodyEvidence: Bool {
         let required: [CaptureRegion] = [.chest, .waist]
@@ -537,13 +552,26 @@ struct CaptureAssessment: Codable, Hashable {
             userOverrodeRecommendation: false,
             brightnessScore: brightness,
             coverageScore: 0,
-            automaticCheckReason: "legacy_capture_not_verified"
+            automaticCheckReason: "legacy_capture_not_verified",
+            captureAcceptance: nil
         )
     }
 
     var automaticStatusTitle: String {
+        if captureAcceptance == .rejected {
+            switch automaticCheckReason {
+            case "subject_not_detected": return "Person not detected"
+            case "body_cropped": return "Required area is cropped"
+            case "subject_too_small": return "Move closer"
+            case "requested_orientation_mismatch": return "Wrong pose orientation"
+            default: break
+            }
+        }
         switch status {
-        case .ready: return "Pose landmarks detected"
+        case .ready:
+            return captureAcceptance == .provisional
+                ? "Framing looks usable"
+                : "Pose evidence detected"
         case .reviewRecommended:
             if confirmedIssues.contains(.tooDark) { return "Extremely dark" }
             if confirmedIssues.contains(.overexposed) { return "Heavily overexposed" }
@@ -555,7 +583,10 @@ struct CaptureAssessment: Codable, Hashable {
     var automaticStatusDetail: String {
         switch status {
         case .ready:
-            return "Required pose landmarks were detected. Review the pose yourself before using it."
+            if captureAcceptance == .provisional {
+                return "Framing and body outline look usable. Some pose landmarks were uncertain, so final comparability will be checked separately."
+            }
+            return "Required pose evidence was detected. Review the pose yourself before using it."
         case .reviewRecommended:
             if confirmedIssues.contains(.tooDark) {
                 return "The photo is extremely dark and may hide body contours."
@@ -576,6 +607,14 @@ struct CaptureAssessment: Codable, Hashable {
                 return "A complete visible shoulder-to-hip line could not be confirmed. Side profiles are harder to detect, and this does not mean the photo is poor."
             case "lower_body_landmarks_not_verified":
                 return "Complete hip-to-ankle landmarks could not be confirmed. This does not mean the photo is poor."
+            case "subject_not_detected":
+                return "Evolv could not find a clear person in the requested pose. Retake this photo."
+            case "body_cropped":
+                return "Part of the required body area is outside the frame. Retake with more space around you."
+            case "subject_too_small":
+                return "Your body is too small in the frame for reliable comparison. Move closer and retake."
+            case "requested_orientation_mismatch":
+                return "Your orientation clearly does not match this requested pose. Retake using the pose example."
             case "legacy_capture_not_verified":
                 return "This photo was saved before automatic evidence details were available."
             default:

@@ -141,7 +141,38 @@ stage "consistency submission validation and replay"
 jq -n \
   --arg session "$SESSION_ID" --arg submission "$SUBMISSION_ID" --arg idem "$IDEMPOTENCY_ID" --arg now "$NOW" \
   --argjson analysis_version "$EXPECTED_ANALYSIS_VERSION" \
-  '{client_submission_id:$submission,idempotency_key:$idem,consent:{version:"pilot-consent-v1",adult_confirmed:true,share_scope:"results_only",accepted_at:$now},results:{schema_version:1,local_session_id:$session,session_result:"consistent",started_at:$now,completed_at:$now,app_build:"security-test",analysis_version:$analysis_version,threshold_set_identifier:"engineering-v1",device_model:"test",operating_system_version:"test",camera_position:"front",sets:[]},wrapped_key:null,objects:[]}' > "$TEST_DIR/init.json"
+  '{
+    client_submission_id:$submission,
+    idempotency_key:$idem,
+    consent:{version:"pilot-consent-v1",adult_confirmed:true,share_scope:"results_only",accepted_at:$now},
+    results:{
+      schema_version:1,
+      local_session_id:$session,
+      session_result:"limited_evidence",
+      started_at:$now,
+      completed_at:$now,
+      app_build:"security-test",
+      analysis_version:$analysis_version,
+      threshold_set_identifier:"engineering-v1",
+      device_model:"test",
+      operating_system_version:"test",
+      camera_position:"front",
+      sets:[range(1;6) as $set | {
+        set_number:$set,
+        regions:[
+          {region:"shoulders",status:"unavailable",fused_delta:null,unavailable_reason_code:"required_pose_evidence_unavailable",contributions:[]},
+          {region:"chest",status:"unavailable",fused_delta:null,unavailable_reason_code:"required_pose_evidence_unavailable",contributions:[]},
+          {region:"waist",status:"unavailable",fused_delta:null,unavailable_reason_code:"required_pose_evidence_unavailable",contributions:[]}
+        ],
+        failure_reason_codes_by_pose:({
+          ("set_" + ($set|tostring) + ".back.hipLandmarks"):"hip_landmarks_unavailable",
+          ("set_" + ($set|tostring) + ".side.comparability"):"pose_not_comparable"
+        })
+      }]
+    },
+    wrapped_key:null,
+    objects:[]
+  }' > "$TEST_DIR/init.json"
 
 jq '.consent.adult_confirmed=false' "$TEST_DIR/init.json" > "$TEST_DIR/forged-consent.json"
 expect_status 400 -X POST "${HEADERS[@]}" "${AUTH[@]}" --data-binary "@$TEST_DIR/forged-consent.json" "$API_BASE/submissions/init"
@@ -197,8 +228,8 @@ jq -n \
   --arg session "$PHOTO_SESSION" --arg submission "$PHOTO_SUBMISSION" \
   --arg idem "$PHOTO_IDEMPOTENCY" --arg object "$PHOTO_OBJECT" \
   --arg sha "$CIPHERTEXT_SHA" --arg now "$NOW" \
-  --argjson bytes "$CIPHERTEXT_BYTES" --argjson analysis_version "$EXPECTED_ANALYSIS_VERSION" \
-  '{client_submission_id:$submission,idempotency_key:$idem,consent:{version:"pilot-consent-v1",adult_confirmed:true,share_scope:"results_and_selected_photos",accepted_at:$now},results:{schema_version:1,local_session_id:$session,session_result:"consistent",started_at:$now,completed_at:$now,app_build:"security-test",analysis_version:$analysis_version,threshold_set_identifier:"engineering-v1",device_model:"test",operating_system_version:"test",camera_position:"front",sets:[]},wrapped_key:{algorithm:"test-envelope"},objects:[{object_id:$object,set_number:1,pose:"front",sha256:$sha,byte_count:$bytes}]}' > "$TEST_DIR/photo-init.json"
+  --argjson bytes "$CIPHERTEXT_BYTES" --slurpfile exact "$TEST_DIR/init.json" \
+  '{client_submission_id:$submission,idempotency_key:$idem,consent:{version:"pilot-consent-v1",adult_confirmed:true,share_scope:"results_and_selected_photos",accepted_at:$now},results:($exact[0].results | .local_session_id=$session),wrapped_key:{algorithm:"test-envelope"},objects:[{object_id:$object,set_number:1,pose:"front",sha256:$sha,byte_count:$bytes}]}' > "$TEST_DIR/photo-init.json"
 
 expect_status 401 -X POST "${HEADERS[@]}" \
   -H 'x-evolv-participant-token: forged-participant-token-that-is-not-valid' \
