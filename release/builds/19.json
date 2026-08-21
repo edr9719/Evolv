@@ -5,6 +5,7 @@
   "bundleIdentifier": "com.app.evolv",
   "branch": "release/build-19",
   "candidateSourceCommit": "d9ce3dc7de532b83c003886b1aa38c5c8c2c3042",
+  "validatedCandidateCommit": "77c12a56b05ad7b11a49a610773865c68bedb91e",
   "backend": {
     "supabaseProjectId": "zaqbnznrfvapbgrjxskv",
     "schemaVersion": 2,
@@ -21,12 +22,23 @@
   "candidateStatus": "founder TestFlight candidate",
   "validation": {
     "sourceParentGates": "passed",
-    "exactCandidatePilotGate": "pending",
-    "hostedIOSEnrollmentE2E": "pending",
+    "exactCandidatePilotGate": "passed",
+    "simulatorTests": "125 total; 117 passed; 8 environment-specific skipped; 0 failed",
+    "uiTests": "9 passed; 0 failed",
+    "physicalDeviceTests": "125 total; 124 passed; 1 hosted-only skipped; 0 failed; all 7 Vision tests passed",
+    "hostedIOSEnrollmentE2E": "passed",
+    "databaseSecurityTests": "42 passed; 0 failed",
+    "edgeStorageTests": "5 passed; 0 failed",
+    "privacySecurityGates": "passed",
+    "releaseBuild": "passed",
+    "hostedBackendHealth": "schema 2; analysis 7; minimum analysis 4; expected consent versions",
     "thresholdSet": "engineering-v1",
     "thresholdsValidated": false,
     "founderAcceptance": "pending"
   },
-  "testFlightStatus": "not uploaded",
+  "uploaded": true,
+  "uploadedAt": "2026-08-21T04:39:59Z",
+  "uploadIdentifier": "308c3c71-0e7f-4064-9207-23d4fb4e5c94",
+  "testFlightStatus": "uploaded; Apple processing",
   "appStoreStatus": "not submitted"
 }
