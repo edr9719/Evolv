@@ -1,0 +1,32 @@
+{
+  "scheme": "Evolv",
+  "version": "1.0",
+  "build": 19,
+  "bundleIdentifier": "com.app.evolv",
+  "branch": "release/build-19",
+  "candidateSourceCommit": "d9ce3dc7de532b83c003886b1aa38c5c8c2c3042",
+  "backend": {
+    "supabaseProjectId": "zaqbnznrfvapbgrjxskv",
+    "schemaVersion": 2,
+    "analysisVersion": 7,
+    "minimumAnalysisVersion": 4,
+    "consentVersions": [
+      "pilot-consent-v1",
+      "pilot-ongoing-v1"
+    ],
+    "enrollmentProtocol": "retry-safe-v2",
+    "enrollmentCredentialVersion": "client_verifier_v2"
+  },
+  "purpose": "Founder TestFlight acceptance of non-consuming invitation validation and retry-safe pilot enrollment",
+  "candidateStatus": "founder TestFlight candidate",
+  "validation": {
+    "sourceParentGates": "passed",
+    "exactCandidatePilotGate": "pending",
+    "hostedIOSEnrollmentE2E": "pending",
+    "thresholdSet": "engineering-v1",
+    "thresholdsValidated": false,
+    "founderAcceptance": "pending"
+  },
+  "testFlightStatus": "not uploaded",
+  "appStoreStatus": "not submitted"
+}
