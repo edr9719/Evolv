@@ -98,6 +98,12 @@ export function canonicalJSONStringify(value: unknown): string {
   }}`;
 }
 
+/// UUID text is case-insensitive, but Swift's encoder emits uppercase hex and
+/// PostgreSQL returns lowercase. Normalize only after UUID syntax validation.
+export function canonicalUUIDString(value: string): string {
+  return value.toLowerCase();
+}
+
 export function randomToken(byteCount = 32): string {
   const bytes = crypto.getRandomValues(new Uint8Array(byteCount));
   return btoa(String.fromCharCode(...bytes))

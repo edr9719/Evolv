@@ -1,5 +1,6 @@
 import {
   canonicalJSONStringify,
+  canonicalUUIDString,
   sha256,
   validateResultsPayload,
 } from "./pilot.ts";
@@ -152,5 +153,14 @@ Deno.test("submission payload identity still changes for changed evidence", asyn
   assert(
     stableHash !== changedHash,
     "materially changed results must conflict",
+  );
+});
+
+Deno.test("iOS uppercase and PostgreSQL lowercase UUID text share one identity", () => {
+  const ios = "A0B1C2D3-E4F5-4A67-8B90-A1B2C3D4E5F6";
+  const postgres = "a0b1c2d3-e4f5-4a67-8b90-a1b2c3d4e5f6";
+  assert(
+    canonicalUUIDString(ios) === canonicalUUIDString(postgres),
+    "UUID casing must not create a false idempotency conflict",
   );
 });

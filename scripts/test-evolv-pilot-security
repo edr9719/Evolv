@@ -223,7 +223,9 @@ CIPHERTEXT_SHA=$(shasum -a 256 "$TEST_DIR/ciphertext.bin" | awk '{print $1}')
 PHOTO_SESSION=$(uuidgen | tr '[:upper:]' '[:lower:]')
 PHOTO_SUBMISSION=$(uuidgen | tr '[:upper:]' '[:lower:]')
 PHOTO_IDEMPOTENCY=$(uuidgen | tr '[:upper:]' '[:lower:]')
-PHOTO_OBJECT=$(uuidgen | tr '[:upper:]' '[:lower:]')
+# Match Foundation's UUID string encoding so the hosted gate catches any
+# case-sensitive comparison against PostgreSQL's lowercase UUID output.
+PHOTO_OBJECT=$(uuidgen)
 jq -n \
   --arg session "$PHOTO_SESSION" --arg submission "$PHOTO_SUBMISSION" \
   --arg idem "$PHOTO_IDEMPOTENCY" --arg object "$PHOTO_OBJECT" \

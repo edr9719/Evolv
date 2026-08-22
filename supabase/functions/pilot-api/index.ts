@@ -1,6 +1,7 @@
 import {
   authenticateParticipant,
   canonicalJSONStringify,
+  canonicalUUIDString,
   CURRENT_ANALYSIS_VERSION,
   deleteParticipantData,
   enforceRateLimit,
@@ -238,7 +239,7 @@ async function initialize(
     }
     seen.add(key);
     requestedObjects.push({
-      objectID,
+      objectID: canonicalUUIDString(objectID),
       setNumber: Number(item.set_number),
       pose: String(item.pose),
       sha256: String(item.sha256),
@@ -285,7 +286,7 @@ async function initialize(
     requestedObjects.map((item) => [item.objectID, item]),
   );
   for (const row of rows || []) {
-    const requested = requestedByID.get(row.id);
+    const requested = requestedByID.get(canonicalUUIDString(row.id));
     if (
       !requested || requested.setNumber !== row.set_number ||
       requested.pose !== row.pose ||
