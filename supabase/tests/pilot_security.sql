@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(42);
+select plan(44);
 
 select has_table('public', 'pilot_participants', 'participant table exists');
 select has_table('public', 'pilot_submissions', 'submission table exists');
@@ -83,6 +83,29 @@ select is(
   (select contribution_type from public.pilot_sessions limit 1),
   'consistency_test',
   'legacy consistency payload is classified as a consistency test'
+);
+select lives_ok(
+  $$select public.pilot_initialize_submission(
+    (select id from public.pilot_participants limit 1),
+    '20000000-0000-4000-8000-000000000001',
+    '30000000-0000-4000-8000-000000000001',
+    '{"version":"pilot-consent-v1","share_scope":"results_only","adult_confirmed":true,"accepted_at":"2026-08-10T00:00:00Z"}'::jsonb,
+    '{"sets":[],"lens_type":"wide","camera_position":"front","operating_system_version":"test","device_model":"test","threshold_set_identifier":"engineering-v1","analysis_version":5,"app_build":"test","completed_at":"2026-08-10T00:20:00Z","started_at":"2026-08-10T00:00:00Z","session_result":"consistent","local_session_id":"40000000-0000-4000-8000-000000000001","schema_version":1}'::jsonb,
+    repeat('0',64), null, '[]'::jsonb
+  )$$,
+  'legacy digest retry succeeds only because stored JSONB is exactly equivalent'
+);
+select throws_ok(
+  $$select public.pilot_initialize_submission(
+    (select id from public.pilot_participants limit 1),
+    '20000000-0000-4000-8000-000000000001',
+    '30000000-0000-4000-8000-000000000001',
+    '{"version":"pilot-consent-v1","share_scope":"results_only","adult_confirmed":true,"accepted_at":"2026-08-10T00:00:00Z"}'::jsonb,
+    '{"schema_version":1,"local_session_id":"40000000-0000-4000-8000-000000000001","session_result":"changed","started_at":"2026-08-10T00:00:00Z","completed_at":"2026-08-10T00:20:00Z","app_build":"test","analysis_version":5,"threshold_set_identifier":"engineering-v1","device_model":"test","operating_system_version":"test","camera_position":"front","lens_type":"wide","sets":[]}'::jsonb,
+    repeat('1',64), null, '[]'::jsonb
+  )$$,
+  'P0001', 'idempotency_conflict',
+  'retry with materially changed results remains rejected'
 );
 select throws_ok(
   $$select public.pilot_initialize_submission(

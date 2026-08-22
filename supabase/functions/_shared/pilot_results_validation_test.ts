@@ -1,4 +1,8 @@
-import { validateResultsPayload } from "./pilot.ts";
+import {
+  canonicalJSONStringify,
+  sha256,
+  validateResultsPayload,
+} from "./pilot.ts";
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -118,5 +122,35 @@ Deno.test("raw landmark schema fields remain forbidden outside reason maps", () 
   assert(
     code === "forbidden_results_field",
     "raw landmarks must remain forbidden",
+  );
+});
+
+Deno.test("submission payload identity is independent of JSON object key order", async () => {
+  const first = {
+    sets: [{ set_number: 1, regions: [{ region: "waist", status: "stable" }] }],
+    analysis_version: 7,
+    schema_version: 1,
+  };
+  const reordered = {
+    schema_version: 1,
+    analysis_version: 7,
+    sets: [{ regions: [{ status: "stable", region: "waist" }], set_number: 1 }],
+  };
+  const firstHash = await sha256(canonicalJSONStringify(first));
+  const reorderedHash = await sha256(canonicalJSONStringify(reordered));
+  assert(
+    firstHash === reorderedHash,
+    "equivalent JSON must have one retry identity",
+  );
+});
+
+Deno.test("submission payload identity still changes for changed evidence", async () => {
+  const stable = { analysis_version: 7, regions: [{ status: "stable" }] };
+  const changed = { analysis_version: 7, regions: [{ status: "increase" }] };
+  const stableHash = await sha256(canonicalJSONStringify(stable));
+  const changedHash = await sha256(canonicalJSONStringify(changed));
+  assert(
+    stableHash !== changedHash,
+    "materially changed results must conflict",
   );
 });

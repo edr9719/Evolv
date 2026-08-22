@@ -79,6 +79,25 @@ export async function sha256(value: string | Uint8Array): Promise<string> {
   );
 }
 
+/// Produces a stable JSON representation for retry identity. Parsed request
+/// payloads contain only JSON values, so sorting every object key makes the
+/// digest independent of encoder/dictionary iteration order while preserving
+/// array order and scalar values exactly.
+export function canonicalJSONStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJSONStringify).join(",")}]`;
+  }
+  const record = value as Record<string, unknown>;
+  return `{${
+    Object.keys(record).sort().map((key) =>
+      `${JSON.stringify(key)}:${canonicalJSONStringify(record[key])}`
+    ).join(",")
+  }}`;
+}
+
 export function randomToken(byteCount = 32): string {
   const bytes = crypto.getRandomValues(new Uint8Array(byteCount));
   return btoa(String.fromCharCode(...bytes))

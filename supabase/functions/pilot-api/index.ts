@@ -1,5 +1,6 @@
 import {
   authenticateParticipant,
+  canonicalJSONStringify,
   CURRENT_ANALYSIS_VERSION,
   deleteParticipantData,
   enforceRateLimit,
@@ -256,7 +257,7 @@ async function initialize(
   if ((objects.length === 0) !== (wrappedKey === null)) {
     throw new Error("consent_object_mismatch");
   }
-  const payloadHash = await sha256(JSON.stringify(results));
+  const payloadHash = await sha256(canonicalJSONStringify(results));
   const { data: submissionID, error } = await client.rpc(
     "pilot_initialize_submission",
     {
